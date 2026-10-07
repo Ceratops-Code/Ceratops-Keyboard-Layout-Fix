@@ -115,9 +115,10 @@ and double global hotkeys, language changes and focused accessibility Ctrl+A
 conversion with toolbar focus recovery and hidden-selection clearing. Run the latter
 only after the installed service has stopped and its tray app has exited;
 another global listener would invalidate the shortcut check.
-The repository's Windows validation runs the key-conversion and accessibility
-tests. Run the shortcut test locally from a signed-in desktop after the
-installed service has stopped. Run each test with CeratopsKeyboardLayout.exe
+GitHub CI runs repository validation. Run the SDLC test operation on a signed-in
+Windows desktop for the key-conversion and accessibility checks. Run the
+shortcut test there after the installed service has stopped. Run each test
+with CeratopsKeyboardLayout.exe
 /ErrorStdOut=UTF-8 and the test's script path, and wait for the process to exit.
 
 Dependencies
