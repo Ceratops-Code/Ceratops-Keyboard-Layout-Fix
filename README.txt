@@ -122,6 +122,8 @@ with CeratopsKeyboardLayout.exe
 /ErrorStdOut=UTF-8 and the test's script path, and wait for the process to exit.
 
 Dependencies
+The Ceratops source code and installer script use the MIT license in LICENSE.
+This does not change the bundled dependencies' licenses.
 AutoHotkey 2.0.29: https://github.com/AutoHotkey/AutoHotkey/releases/tag/v2.0.29
 Its license is in license.txt.
 UIA-v2: https://github.com/Descolada/UIA-v2
