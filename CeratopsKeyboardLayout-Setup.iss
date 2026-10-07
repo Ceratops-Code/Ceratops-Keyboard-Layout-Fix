@@ -1,7 +1,7 @@
 ; Rebuild with Inno Setup 6's ISCC.exe from this directory. The protected
 ; Program Files copy owns the SYSTEM service and its desktop companion.
 #define AppName "Ceratops Keyboard Layout"
-#define AppVersion "1.0.8"
+#define AppVersion "1.0.9"
 
 [Setup]
 AppName={#AppName}
@@ -42,6 +42,7 @@ Source: "CeratopsKeyboardLayout.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "CeratopsKeyboardLayout.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dependencies.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "license.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Lib\UIA.ahk"; DestDir: "{app}\Lib"; Flags: ignoreversion
 Source: "Lib\LICENSE.txt"; DestDir: "{app}\Lib"; Flags: ignoreversion; AfterInstall: ConfigureService

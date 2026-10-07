@@ -1,0 +1,61 @@
+version: 4
+kind: ceratops-sdlc
+repository:
+  capabilities:
+    uv:
+      executable: uv
+    windows:
+      executable: powershell
+      platforms: [windows]
+  actions:
+    bootstrap:
+      requires:
+        capabilities:
+          - uv
+      steps:
+        - run:
+            - uv
+            - sync
+            - --project
+            - scripts
+            - --locked
+    validate:
+      requires:
+        capabilities:
+          - uv
+      steps:
+        - run:
+            - uv
+            - run
+            - --project
+            - scripts
+            - --locked
+            - python
+            - scripts/validate-repository.py
+    test:
+      requires:
+        capabilities: [uv, windows]
+      steps:
+        - run: [uv, run, --project, scripts, --locked, python, -c, "import os, sys; sys.exit('Desktop tests require a signed-in Windows session, not CI.' if os.getenv('CI') else 0)"]
+        - run: [uv, run, --project, scripts, --locked, python, -c, "import os, subprocess, sys; sys.exit(subprocess.call([os.path.abspath('CeratopsKeyboardLayout.exe'), '/ErrorStdOut=UTF-8', 'Tests/Test-KeyConversion.ahk']))"]
+        - run: [uv, run, --project, scripts, --locked, python, -c, "import os, subprocess, sys; sys.exit(subprocess.call([os.path.abspath('CeratopsKeyboardLayout.exe'), '/ErrorStdOut=UTF-8', 'Tests/Test-AccessibleConversion.ahk']))"]
+
+deliverables:
+  apps:
+    ceratops-keyboard-layout:
+      source: .
+      manifest: CeratopsKeyboardLayout-Setup.iss
+      prerequisites: []
+      actions:
+        validate:
+          requires:
+            capabilities: []
+          no-op: Repository validation runs separately; no app-only validation is declared.
+        test:
+          requires:
+            capabilities: []
+          no-op: Repository tests run separately; the desktop hotkey check runs locally before release.
+        install:
+          requires:
+            capabilities: []
+          no-op: People install the GitHub Release executable; the repository does not auto-install it.

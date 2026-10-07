@@ -52,8 +52,10 @@ are supported. A standard account gets an ordinary tray instance.
 The shortcuts do not make an unsupported custom editor compatible: a caret or
 clipboard copy alone cannot prove that Ctrl+A selected its text.
 
-To install on another 64-bit Windows PC, copy only
-CeratopsKeyboardLayout-Setup.exe and run it. The standalone installer includes
+To install on another 64-bit Windows PC, download
+CeratopsKeyboardLayout-Setup.exe from
+https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases
+and run it. The standalone installer includes
 the runtime and dependencies. It asks for administrator approval once and
 installs to Program Files\CeratopsKeyboardLayout with a Start Menu entry.
 Before creating its automatic LocalSystem service, setup runs a temporary
@@ -88,10 +90,12 @@ The service starts automatically at Windows boot and owns tray companions for
 active desktop sessions; it stops them when removed. The common Startup
 shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
-The project folder owns CeratopsKeyboardLayout-Setup.iss and the current
-standalone setup executable. Inno Setup 6's ISCC.exe compiles the script to
-a temporary output directory; only a successful build replaces the setup
-executable. Temporary compiler and output files are removed after the build.
+The project folder owns CeratopsKeyboardLayout-Setup.iss and a local current
+standalone setup executable. The setup executable is excluded from Git and
+published as a GitHub Release asset. Inno Setup 6's ISCC.exe compiles the
+script to a temporary output directory; only a successful build replaces the
+local setup executable. Temporary compiler and output files are removed after
+the build.
 The running utility creates no files, output versions, checkpoints or logs.
 Maps and clipboard backups exist in memory and are released after use/exit.
 Setup's one-time SYSTEM test task and its XML/result files live in the
@@ -111,11 +115,19 @@ and double global hotkeys, language changes and focused accessibility Ctrl+A
 conversion with toolbar focus recovery and hidden-selection clearing. Run the latter
 only after the installed service has stopped and its tray app has exited;
 another global listener would invalidate the shortcut check.
-Run each with CeratopsKeyboardLayout.exe /ErrorStdOut=UTF-8 and the test's script path.
+GitHub CI runs repository validation. Run the SDLC test operation on a signed-in
+Windows desktop for the key-conversion and accessibility checks. Run the
+shortcut test there after the installed service has stopped. Run each test
+with CeratopsKeyboardLayout.exe
+/ErrorStdOut=UTF-8 and the test's script path, and wait for the process to exit.
 
 Dependencies
+The Ceratops source code and installer script use the MIT license in LICENSE.
+This does not change the bundled dependencies' licenses.
 AutoHotkey 2.0.29: https://github.com/AutoHotkey/AutoHotkey/releases/tag/v2.0.29
 Its license is in license.txt.
+Its corresponding source is at
+https://github.com/AutoHotkey/AutoHotkey/archive/refs/tags/v2.0.29.zip.
 UIA-v2: https://github.com/Descolada/UIA-v2
 Its license is in Lib\LICENSE.txt. Exact dependency revisions are recorded
 in dependencies.json. The installer requires no Windows keyboard driver or
