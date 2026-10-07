@@ -126,6 +126,8 @@ The Ceratops source code and installer script use the MIT license in LICENSE.
 This does not change the bundled dependencies' licenses.
 AutoHotkey 2.0.29: https://github.com/AutoHotkey/AutoHotkey/releases/tag/v2.0.29
 Its license is in license.txt.
+Its corresponding source is at
+https://github.com/AutoHotkey/AutoHotkey/archive/refs/tags/v2.0.29.zip.
 UIA-v2: https://github.com/Descolada/UIA-v2
 Its license is in Lib\LICENSE.txt. Exact dependency revisions are recorded
 in dependencies.json. The installer requires no Windows keyboard driver or
