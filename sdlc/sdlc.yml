@@ -27,7 +27,10 @@ repository:
         - run:
             - uv
             - run
+            - --project
+            - scripts
             - --locked
+            - python
             - scripts/validate-repository.py
     test:
       requires:

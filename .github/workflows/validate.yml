@@ -20,12 +20,13 @@ jobs:
           node-version: "24"
       - name: Install npm validation dependencies
         run: npm --prefix scripts ci
-      # The AutoHotkey tests require an interactive Windows desktop. Hosted
-      # runners cannot exercise their GUI fixtures; run SDLC tests locally.
-      - name: Sync validation dependencies
-        run: uv sync --project scripts --locked
+      # Interactive AutoHotkey tests run on a Windows desktop before release.
       - name: Validate repository
-        run: uv run --project scripts --locked python scripts/validate-repository.py --evidence-file "${{ runner.temp }}/repository-validation.log"
+        uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@ad6eb23c51459e4d176f952753bf4152099ab6b7
+        with:
+          repo-root: ${{ github.workspace }}
+          evidence-file: ${{ runner.temp }}/repository-validation.log
+          run-tests: "false"
 
       - name: Upload validation evidence
         if: failure()
