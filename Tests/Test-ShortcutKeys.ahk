@@ -33,6 +33,8 @@ SendDoubleShortcut(key) {
     SendInput("{vk" key "}{Alt up}{Ctrl up}")
 }
 try {
+    ; AutoHotkey's hidden window title starts with the full script path.
+    SetTitleMatchMode(2)
     DetectHiddenWindows(true)
     ; Match the running script name at either the project or installed path.
     ; Two global listeners make synthetic shortcut results meaningless.

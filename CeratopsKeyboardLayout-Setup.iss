@@ -1,7 +1,7 @@
 ; Rebuild with Inno Setup 6's ISCC.exe from this directory. The protected
 ; Program Files copy owns the SYSTEM service and its desktop companion.
 #define AppName "Ceratops Keyboard Layout"
-#define AppVersion "1.0.9"
+#define AppVersion "1.0.10"
 
 [Setup]
 AppName={#AppName}
