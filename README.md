@@ -9,8 +9,11 @@ Windows to the chosen keyboard layout.
 Download the standalone Windows installer from
 [GitHub Releases](https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases).
 The installer includes the AutoHotkey runtime and starts Ceratops when you sign
-in. English, Hebrew, and Russian keyboard layouts must already be installed in
-Windows. See [the user guide](README.txt) for installation, shortcut behavior,
+in. It uses whichever of the supported keyboard layouts are installed in
+Windows; missing Hebrew or Russian keyboards do not prevent it from starting.
+A shortcut for an unavailable target shows a brief message and leaves the
+text, selection, clipboard, and active keyboard untouched.
+See [the user guide](README.txt) for installation, shortcut behavior,
 editor limitations, and removal.
 
 | Shortcut | Action |
