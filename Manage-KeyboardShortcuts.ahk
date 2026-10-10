@@ -305,7 +305,11 @@ class KeyboardShortcutManager {
 
     QueueRequest(request) {
         this.Requests.Push(request)
-        if !this.Processing {
+        this.ScheduleDispatch()
+    }
+
+    ScheduleDispatch() {
+        if !this.Processing && this.Requests.Length {
             this.Processing := true
             SetTimer(this.Dispatch, -1)
         }
@@ -320,10 +324,14 @@ class KeyboardShortcutManager {
         try {
             while this.Requests.Length {
                 request := this.Requests.RemoveAt(1)
-                ConvertFocusedText(request.Target, request.Window, request.Behavior)
+                ConvertOneFocusedText(request.Target, request.Window, request.Behavior)
             }
         } finally {
             this.Processing := false
+            ; A hotkey can append after the loop observed an empty queue. Its
+            ; original window/order stay queued; never wait for another key.
+            ; If it arrives after this reset, QueueRequest already schedules it.
+            this.ScheduleDispatch()
         }
     }
 

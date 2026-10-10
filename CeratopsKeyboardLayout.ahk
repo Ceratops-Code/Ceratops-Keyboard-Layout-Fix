@@ -522,24 +522,6 @@ class RichHtml {
     }
 }
 
-ConvertFocusedText(target, window, behavior) {
-    static processing := false, queue := []
-    queue.Push({target: target, window: window, behavior: behavior})
-    if processing
-        return
-    processing := true
-    try {
-        ; A later hotkey can arrive while an editor is still finishing a paste.
-        ; Preserve its original window and run every request in press order.
-        while queue.Length {
-            request := queue.RemoveAt(1)
-            ConvertOneFocusedText(request.target, request.window, request.behavior)
-        }
-    } finally {
-        processing := false
-    }
-}
-
 ConvertOneFocusedText(target, window, behavior) {
     global Converter
     failureMessage := "", canSwitch := false

@@ -197,6 +197,79 @@ CheckKeyCombinationInterface(shortcuts) {
     shortcuts.CloseDialog()
 }
 
+; Inject a queued shortcut exactly before/after the dispatcher observes an
+; empty queue. Real one-shot timers must drain it without another key press.
+; Window zero makes conversion leave the user's editor and clipboard alone.
+class InterruptedDispatchQueue {
+    __New(boundary, callback) {
+        this.Items := [], this.Removed := [], this.Boundary := boundary
+        this.Interrupt := callback
+    }
+    Length {
+        get {
+            count := this.Items.Length
+            if !count && this.Interrupt {
+                callback := this.Interrupt
+                this.Interrupt := 0
+                callback()
+                if this.Boundary = "before"
+                    count := this.Items.Length
+            }
+            return count
+        }
+    }
+    Push(request) => this.Items.Push(request)
+    RemoveAt(index) {
+        request := this.Items.RemoveAt(index)
+        this.Removed.Push(request.Sequence)
+        return request
+    }
+}
+CheckDispatchInterruptions() {
+    global Converter
+    target := ""
+    for name in Converter.Layouts {
+        target := name
+        break
+    }
+    if target = ""
+        throw Error("The dispatch check needs one supported installed keyboard.")
+    for boundary in ["before", "after"] {
+        Loop 5 {
+            manager := KeyboardShortcutManager(Converter)
+            request := {Target: target, Window: 0, Behavior: "selected", Sequence: 2}
+            queue := InterruptedDispatchQueue(boundary, manager.QueueRequest.Bind(manager, request))
+            manager.Requests := queue
+            manager.QueueRequest({Target: target, Window: 0, Behavior: "selected", Sequence: 1})
+            WaitForDispatch(manager, queue, 2)
+            manager.QueueRequest({Target: target, Window: 0, Behavior: "selected", Sequence: 3})
+            WaitForDispatch(manager, queue, 3)
+            for index, sequence in queue.Removed
+                if index != sequence
+                    throw Error("Interrupted dispatch changed request order or repeated a request.")
+            SetTimer(manager.Dispatch, 0)
+        }
+    }
+}
+WaitForDispatch(manager, queue, count) {
+    deadline := A_TickCount + 1000
+    while (queue.Removed.Length < count || manager.Processing) && A_TickCount < deadline
+        Sleep(5)
+    if queue.Removed.Length != count || queue.Items.Length || manager.Processing
+        throw Error("A shortcut queued " queue.Boundary " the empty check was stranded.")
+}
+if A_Args.Length && A_Args[A_Args.Length] = "--dispatch-only" {
+    try {
+        CheckDispatchInterruptions()
+        try FileAppend("PASS repeated dispatcher requests and both teardown interruption boundaries`n", "*")
+        dispatchCode := 0
+    } catch Error as failure {
+        try FileAppend("FAIL: " failure.Message " (line " failure.Line ")`n", "*")
+        dispatchCode := 1
+    }
+    ExitApp(dispatchCode)
+}
+
 ; UI-only checks do not register global keys, send keyboard input, change the
 ; shared settings, or stop an installed service. The full desktop suite also
 ; uses these same checks before testing real key capture and conversion.
@@ -235,6 +308,7 @@ try {
         throw Error("Supply the caller-owned task temp root as the first argument.")
     settingsDirectory := A_Args[1] "\shortcut-desktop-" DllCall("GetCurrentProcessId")
     settings := KeyboardShortcutSettings(settingsDirectory "\Shortcuts.ini")
+    CheckDispatchInterruptions()
     shortcuts := KeyboardShortcutManager(Converter, settings)
     shortcuts.Start()
     CheckKeyCombinationInterface(shortcuts)
