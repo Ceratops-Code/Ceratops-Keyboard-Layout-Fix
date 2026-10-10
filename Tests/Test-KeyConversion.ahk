@@ -16,7 +16,7 @@ class NativeTextFieldFixture extends NativeTextField {
     SelectAll() => SendMessage(0xB1, 0, -1, this.Control)
 }
 
-testExitCode := 1, testClipboardSequence := 0
+testExitCode := 1
 try {
     for test in [
         ["אד", "en", "ts"], ["שלום", "en", "akuo"],
@@ -107,11 +107,9 @@ try {
     testGui.Show("Hide")
     field := NativeTextFieldFixture(testGui.Hwnd, inputControl.Hwnd)
     ; ClipboardAll can contain volatile bytes even when Windows' sequence is
-    ; unchanged. Own a known fixture and check both its content and sequence;
-    ; restore the user's formats unless another copy replaced our fixture.
-    savedClipboard := ClipboardAll()
-    clipboardFixture := "Ceratops native conversion clipboard fixture"
-    A_Clipboard := clipboardFixture
+    ; unchanged. Observe text and Windows' write counter without changing the
+    ; user's clipboard or notifying clipboard listeners between desktop tests.
+    clipboardBefore := A_Clipboard
     testClipboardSequence := DllCall("GetClipboardSequenceNumber", "UInt")
     ; The unavailable-target entry path must stop before asking even an
     ; unfocused editor to select or copy. Its message makes that ordering
@@ -172,7 +170,7 @@ try {
     Assert(field.Selection()[1], field.Selection()[2], "Repeated whole field deselected")
     Assert(DllCall("GetClipboardSequenceNumber", "UInt"), testClipboardSequence,
         "Native conversion does not write any clipboard format")
-    Assert(A_Clipboard, clipboardFixture, "Native clipboard content stays unchanged")
+    Assert(A_Clipboard == clipboardBefore, true, "Native clipboard content stays unchanged")
     inputControl.Value := "English text"
     SendMessage(0xB1, 0, 7, inputControl.Hwnd)
     field.Convert("en", "en", "selected")
@@ -187,12 +185,5 @@ try {
     try FileAppend("FAIL: " failure.Message " (line " failure.Line ")`n", "*")
 } finally {
     try testGui.Destroy()
-    try {
-        if testClipboardSequence && DllCall("GetClipboardSequenceNumber", "UInt") = testClipboardSequence
-            A_Clipboard := savedClipboard
-    } catch Error as failure {
-        try FileAppend("FAIL: Clipboard restoration: " failure.Message "`n", "*")
-        testExitCode := 1
-    }
 }
 ExitApp(testExitCode)
