@@ -33,12 +33,18 @@ existing item, so the bullet is not duplicated. If that wrapper is unusual,
 it pastes plain converted words inside the item to keep the list structure.
 If a rich editor provides no usable HTML copy, conversion stops.
 
-Conversion uses whichever supported Windows layouts are present at startup.
+Conversion uses whichever supported Windows layouts are currently available.
 The app still starts when Hebrew, Russian, or US English is absent. Only
 installed layouts participate in conversion. A shortcut for a missing target
 shows a brief message without selecting text, changing it, touching the
 clipboard, or switching the keyboard. Text and symbols from an absent source
-layout are preserved. Restart Ceratops after adding or removing a keyboard.
+layout are preserved. Adding or removing a keyboard takes effect on the next
+shortcut without restarting Ceratops. Each conversion request reads Windows'
+layout list once before touching the editor or clipboard. Conversion tables
+stay cached unless that list changes; order and duplicate entries do not cause
+a rebuild. A changed list produces a complete replacement cache before it is
+used. A failed query stops that conversion without changing text, selection,
+clipboard or active keyboard. No background polling or watcher is used.
 Shift/capitalization is preserved between English and Russian; Hebrew letters
 have no capitals.
 Text is processed only in memory, without network requests or saved text logs.
@@ -77,6 +83,31 @@ Uninstall an older per-user version first if one exists, to avoid two copies.
 Install the Windows keyboard layouts you want to use separately; the
 installer does not add languages or require all supported keyboards.
 
+Updates
+Each start of an installed tray app checks the public GitHub Releases API for
+a newer stable version and asks whether to upgrade. No account is needed.
+Choosing No keeps the current version; the next normal start checks again.
+An offline or unavailable GitHub API does not interrupt the app or show errors.
+Only the registered installed copy checks; unpacked source copies skip it.
+The check sends no text or clipboard content to GitHub.
+
+Choosing Yes starts a separate Windows PowerShell helper. A normally launched
+tray app requests administrator approval once for installation; an already
+elevated tray app does not need another prompt. The helper downloads both the
+new installer and the published installer for the currently installed version
+from this repository. Both must match GitHub's SHA-256 digest and byte count
+before installation starts. It holds their accepted files against writes and
+deletion through setup and recovery. If either package cannot be obtained,
+it reports Upgrade failed and leaves the running version untouched.
+
+Hotkeys continue working during checks/downloads and pause briefly while setup
+replaces the app and restarts its service or Startup fallback. If new setup
+fails or registers the wrong version, the helper runs the previous installer
+and reports Upgrade failed. If Windows also prevents recovery, it reports that
+separately and gives the saved previous installer's path for manual recovery.
+Automatic recovery cannot guarantee success against disk or Windows failures.
+Setup's immediate restart skips the update prompt; later starts check normally.
+
 To run the unpacked copy instead, launch CeratopsKeyboardLayout.exe with
 CeratopsKeyboardLayout.ahk as its argument.
 CeratopsKeyboardLayout.exe embeds the Trixie icon from
@@ -91,7 +122,8 @@ installation does not include.
 
 Storage and lifecycle
 The protected Program Files directory owns the scripts, pinned runtime, UIA
-dependency, licenses and icon assets. It contains only the current version.
+dependency, licenses and icon assets. It contains the current application
+version and, during updates, the protected UpdateCache subdirectory.
 The service starts automatically at Windows boot and owns tray companions for
 active desktop sessions; it stops them when removed. The common Startup
 shortcut exists only in fallback mode and is owned by the installer. The
@@ -118,8 +150,18 @@ checksums, and publishes only after both required assets are present. Published
 release assets are never replaced or deleted; each keeps its version identity.
 The app's SDLC install action consumes that successful build, runs setup silently,
 and requires an administrator terminal. Building does not install or publish it.
-The running utility creates no files, output versions, checkpoints or logs.
-Maps and clipboard backups exist in memory and are released after use/exit.
+The conversion code creates no files or text logs. Maps and clipboard backups
+exist in memory and are released after use/exit.
+Update-AppInstall.ps1 owns UpdateCache beside the installed scripts. Under a
+machine-wide upgrade lock it creates a unique attempt directory for the two
+installers. At helper startup it removes abandoned attempts and retains only
+the newest failed-recovery attempt while preparing the new one. On completion
+it deletes downloads and temporary attempts; if recovery fails, it keeps only
+that attempt's previous installer and an error record limited to 8 KiB. Later
+successful installation removes that recovery copy. Uninstall removes the
+owned cache. There are no update history logs. Links and unrelated directories
+are left untouched; cleanup failures are reported instead of hiding the
+installation outcome. A session-wide check lock prevents duplicate prompts.
 Setup's one-time SYSTEM test task and its XML/result files live in the
 installer's temporary directory and are removed immediately after the test.
 They do not persist across restarts.
@@ -130,10 +172,22 @@ bounded retention, upload interruption, and published-asset protection without
 installing software or accessing GitHub. Local SDLC and GitHub CI run the same
 test entrypoint. Its private test files are removed from the caller-selected
 task temp root, or the repository parent's tmp project test directory.
+Tests\Test-AppUpdates.ps1 uses the same temporary-file ownership: each run
+creates one private directory under the caller's -TempRoot and removes it on
+completion. Its default is the repository parent's tmp project test directory.
 
-Validation
+Checks
+Tests\Test-AppUpdates.ps1 exercises version ordering, stable release assets,
+upgrade consent, offline checks, checksums, download limits, preparation
+failures, recovery, concurrent installation and bounded cache retention.
+On Windows it also checks file locks, executable launch under a read lock,
+cache junction refusal and busy/abandoned update locks. It substitutes HTTP
+and installer boundaries and never installs software or changes a service.
+Run it with powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
+Tests\Test-AppUpdates.ps1, optionally passing -TempRoot for its private files.
 Tests\Test-KeyConversion.ahk exercises the layout maps, every installed-layout
-subset, list markers, selected and whole-field conversion, undo, clipboard
+subset, live additions/removals, unchanged-cache reuse, failed layout queries,
+list markers, selected and whole-field conversion, undo, clipboard
 preservation and deselection. The test PC needs all supported layouts to
 exercise real Win32 key output; subset checks simulate missing keyboards.
 Tests\Test-AccessibleConversion.ahk checks selected-text accessibility, rich
@@ -144,7 +198,7 @@ and double global hotkeys, language changes and focused accessibility Ctrl+A
 conversion with toolbar focus recovery and hidden-selection clearing. Run the latter
 only after the installed service has stopped and its tray app has exited;
 another global listener would invalidate the shortcut check.
-GitHub CI runs repository validation. Run the SDLC test operation on a signed-in
+GitHub CI runs repository, packaging and portable updater checks. Run the SDLC test operation on a signed-in
 Windows desktop for the key-conversion and accessibility checks. Run the
 shortcut test there after the installed service has stopped. Run each test
 with CeratopsKeyboardLayout.exe

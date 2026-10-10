@@ -45,6 +45,7 @@ repository:
         capabilities: [uv, windows]
       steps:
         - run: [uv, run, --project, scripts, --locked, python, -c, "import os, sys; sys.exit('Desktop tests require a signed-in Windows session, not CI.' if os.getenv('CI') else 0)"]
+        - run: [powershell, -NoProfile, -NonInteractive, -ExecutionPolicy, Bypass, -File, Tests/Test-AppUpdates.ps1]
         - run: [./CeratopsKeyboardLayout.exe, /ErrorStdOut=UTF-8, Tests/Test-KeyConversion.ahk]
         - run: [./CeratopsKeyboardLayout.exe, /ErrorStdOut=UTF-8, Tests/Test-AccessibleConversion.ahk]
 
