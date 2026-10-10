@@ -9,8 +9,12 @@ repository:
       platforms: [windows]
     inno-setup:
       executable: ISCC.exe
-      version: 6.7.3
+      version-from:
+        file: dependencies.json
+        key: InnoSetup
       platforms: [windows]
+    github-cli:
+      executable: gh
   actions:
     bootstrap:
       requires:
@@ -54,11 +58,21 @@ deliverables:
         output-directory: .
         filename-pattern: CeratopsKeyboardLayout-Setup.exe
       actions:
+        test:
+          requires:
+            capabilities: [uv]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, Tests/test_installer_release.py]
         build:
           requires:
-            capabilities: [windows, inno-setup]
+            capabilities: [uv, windows, inno-setup]
           steps:
-            - run: [ISCC.exe, /Q, CeratopsKeyboardLayout-Setup.iss]
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build]
+        publish:
+          requires:
+            capabilities: [uv, windows, inno-setup, github-cli]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish]
   apps:
     ceratops-keyboard-layout:
       source: .
@@ -77,12 +91,4 @@ deliverables:
           requires:
             capabilities: [uv, windows]
           steps:
-            - run:
-                - uv
-                - run
-                - --project
-                - scripts
-                - --locked
-                - python
-                - -c
-                - "import os, subprocess, sys; sys.exit(subprocess.call([os.path.abspath('CeratopsKeyboardLayout-Setup.exe'), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-']))"
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install]

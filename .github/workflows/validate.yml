@@ -20,6 +20,8 @@ jobs:
           node-version: "24"
       - name: Install npm validation dependencies
         run: npm --prefix scripts ci
+      - name: Test installer release workflow
+        run: uv run --project scripts --locked python Tests/test_installer_release.py
       # Interactive AutoHotkey tests run on a Windows desktop before release.
       - name: Validate repository
         uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@ad6eb23c51459e4d176f952753bf4152099ab6b7

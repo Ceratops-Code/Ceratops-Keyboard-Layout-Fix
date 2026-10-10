@@ -1,5 +1,7 @@
 {
   "AutoHotkey": "2.0.29",
   "archive_sha256": "b2d0200724a6b6ad22c965c939c5e5a2c64a35d1ccb455a3ca3f8ce415c5a296",
+  "source_archive_sha256": "a028b96c0f863a070c64a5a55b5faf6acc165f874a8fd3049ece75d87edc73a9",
+  "InnoSetup": "6.7.3",
   "UIA_commit": "2846a9b10518a95cf26a6c43671a9512b231ccb7"
 }

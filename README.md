@@ -29,13 +29,17 @@ under [MIT](LICENSE). The bundled AutoHotkey runtime retains its
 [MIT license](Lib/LICENSE.txt). The Ceratops image assets are not included in
 the source-code MIT grant.
 
-To build the installer, install Inno Setup 6.7.3 and make its compiler directory
-available on `PATH`. The SDLC operation
-`deliverables.packages.ceratops-keyboard-layout-installer.actions.build` runs
-`ISCC.exe /Q CeratopsKeyboardLayout-Setup.iss` and creates
-`CeratopsKeyboardLayout-Setup.exe` in the repository root. The app's SDLC
-`install` operation runs that installer silently from an administrator terminal;
-building alone does not install it or publish a GitHub Release.
+To build the installer, install the Inno Setup version pinned in
+`dependencies.json`. The SDLC package actions `test`, `build`, and `publish`
+for `ceratops-keyboard-layout-installer` call the repository-owned release
+workflow. It finds the compiler on `PATH` or in its standard Windows installation
+directories, builds `CeratopsKeyboardLayout-Setup.iss`, and creates
+`CeratopsKeyboardLayout-Setup.exe` in the current checkout.
+Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's
+corresponding GPL source archive. Matching draft uploads resume after interruption;
+published assets are never overwritten. The app's SDLC `install` action consumes
+the same successful build and runs setup silently from an administrator terminal.
+Building alone does not publish or install it.
 The [user guide](README.txt) lists the
 desktop regression checks; GitHub CI validates the repository without trying
 to run interactive desktop tests on a hosted runner.

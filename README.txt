@@ -98,15 +98,26 @@ shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
 The project folder owns CeratopsKeyboardLayout-Setup.iss and a local current
 standalone setup executable. The setup executable is excluded from Git and
-published as a GitHub Release asset. The SDLC package build action runs Inno
-Setup 6.7.3's ISCC.exe with CeratopsKeyboardLayout-Setup.iss and writes the
-current setup executable to the project folder. The compiler directory must
-be on PATH. A failed compiler exit stops the operation; no failed build is
-eligible for installation or publication. The compiler manages its temporary
-files; the project retains only its current local setup executable. Published
-GitHub Release assets retain their separate version identities.
-The app's SDLC install action runs the built setup executable silently and
-requires an administrator terminal. Building does not install or publish it.
+published as a GitHub Release asset. SDLC calls scripts\release-installer.py
+for build, publication and installation. The Inno Setup version is pinned in
+dependencies.json. The helper finds ISCC.exe on PATH or in its standard Windows
+installation directories. It compiles CeratopsKeyboardLayout-Setup.iss into a
+private staging bundle and obtains the checksum-pinned AutoHotkey source ZIP.
+Only successful bundles replace the current setup executable.
+The primary checkout's .build\installer directory owns one lock and at most
+three completed build bundles. Packaging bytes and compiler identity identify
+each bundle; changing only tests or CI does not rebuild an accepted installer.
+Each bundle contains the installer, GPL source ZIP and its build receipt.
+At startup the owning helper removes abandoned staging bundles under its lock;
+after each build or reuse it prunes all but the current bundle and two others.
+It removes private staging and atomic-copy files after success or failure and
+creates no operational history. Failed compilation leaves the previous setup.
+Publication requires a successful current build and authenticated GitHub CLI.
+It resumes matching draft uploads, checks the tag's source commit and uploaded
+checksums, and publishes only after both required assets are present. Published
+release assets are never replaced or deleted; each keeps its version identity.
+The app's SDLC install action consumes that successful build, runs setup silently,
+and requires an administrator terminal. Building does not install or publish it.
 The running utility creates no files, output versions, checkpoints or logs.
 Maps and clipboard backups exist in memory and are released after use/exit.
 Setup's one-time SYSTEM test task and its XML/result files live in the
@@ -114,6 +125,11 @@ installer's temporary directory and are removed immediately after the test.
 They do not persist across restarts.
 Regression checks create temporary test windows and close them on completion.
 They restore the prior foreground window and clipboard where applicable.
+Tests\test_installer_release.py checks build failure preservation, cache reuse,
+bounded retention, upload interruption, and published-asset protection without
+installing software or accessing GitHub. Local SDLC and GitHub CI run the same
+test entrypoint. Its private test files are removed from the caller-selected
+task temp root, or the repository parent's tmp project test directory.
 
 Validation
 Tests\Test-KeyConversion.ahk exercises the layout maps, every installed-layout
