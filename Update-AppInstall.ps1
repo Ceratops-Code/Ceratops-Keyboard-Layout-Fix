@@ -7,7 +7,6 @@ param([switch]$Apply, [string]$TargetVersion)
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $script:ReleaseRepository = 'Ceratops-Code/Ceratops-Keyboard-Layout-Fix'
-$script:InstallerAssetName = 'CeratopsKeyboardLayout-Setup.exe'
 $script:MaximumInstallerBytes = 128MB
 
 function ConvertTo-AppVersion {
@@ -90,11 +89,13 @@ function ConvertFrom-InstallerRelease {
     if ($null -ne $ExpectedVersion -and $version -ne $ExpectedVersion) {
         throw 'GitHub returned a different application version.'
     }
-    $assets = @($Release.assets | Where-Object { $_.name -ceq $script:InstallerAssetName })
+    # Bind the filename to the release version for both upgrade and recovery.
+    $installerName = 'CeratopsKeyboardLayout-Setup-{0}.exe' -f (Get-AppVersionText $version)
+    $assets = @($Release.assets | Where-Object { $_.name -ceq $installerName })
     if ($assets.Count -ne 1) { throw 'The release must contain exactly one installer.' }
     $asset = $assets[0]
     $expectedUrl = 'https://github.com/{0}/releases/download/{1}/{2}' -f
-        $script:ReleaseRepository, $Release.tag_name, $script:InstallerAssetName
+        $script:ReleaseRepository, $Release.tag_name, $installerName
     if ($asset.browser_download_url -cne $expectedUrl -or
         $asset.digest -cnotmatch '^sha256:[a-fA-F0-9]{64}$' -or
         $asset.size -le 0 -or $asset.size -gt $script:MaximumInstallerBytes) {

@@ -22,6 +22,10 @@ updater prepares both installers first and restores the previous version if
 the new installation fails. Both installers retain the registered installation
 folder. Offline checks are quiet; portable copies do not
 upgrade the installed app.
+Installer filenames include their version, such as
+`CeratopsKeyboardLayout-Setup-1.0.12.exe`. Install version 1.0.12 manually when
+upgrading from an earlier release. Earlier updaters expect the unversioned filename.
+Later automatic updates use the versioned filename for both upgrade and recovery.
 See [the user guide](README.txt) for installation, shortcut behavior,
 editor limitations, and removal.
 
@@ -43,7 +47,11 @@ To build the installer, install the Inno Setup version pinned in
 for `ceratops-keyboard-layout-installer` call the repository-owned release
 workflow. It finds the compiler on `PATH` or in its standard Windows installation
 directories, builds `CeratopsKeyboardLayout-Setup.iss`, and creates
-`CeratopsKeyboardLayout-Setup.exe` in the current checkout.
+`CeratopsKeyboardLayout-Setup-<version>.exe` in the current checkout. `AppVersion`
+in the installer script owns the version used in its filename, Windows file
+details, and release tag. The installer also carries the product description,
+Ceratops-Code publisher, copyright, and project/support/update links. These
+details do not replace a trusted code signature.
 Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's
 corresponding GPL source archive. Matching draft uploads resume after interruption;
 published assets are never overwritten. The app's SDLC `install` action consumes

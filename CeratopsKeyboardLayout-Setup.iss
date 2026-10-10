@@ -1,12 +1,22 @@
 ; Rebuild with Inno Setup 6's ISCC.exe from this directory. The protected
 ; Program Files copy owns the SYSTEM service and its desktop companion.
 #define AppName "Ceratops Keyboard Layout"
-#define AppVersion "1.0.11"
+#define AppVersion "1.0.12"
+#define AppPublisher "Ceratops-Code"
+#define AppURL "https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix"
+#define AppDescription "Convert keyboard layouts between English, Hebrew, and Russian."
+#define AppCopyright "Copyright (c) 2026 Ceratops-Code contributors"
 
 [Setup]
 AppName={#AppName}
 AppVersion={#AppVersion}
-AppPublisher={#AppName}
+AppPublisher={#AppPublisher}
+AppPublisherURL={#AppURL}
+AppSupportURL={#AppURL}/issues
+AppUpdatesURL={#AppURL}/releases
+AppComments={#AppDescription}
+AppCopyright={#AppCopyright}
+AppReadmeFile={app}\README.txt
 DefaultDirName={autopf}\CeratopsKeyboardLayout
 DisableDirPage=yes
 UsePreviousAppDir=no
@@ -17,14 +27,15 @@ UsePreviousPrivileges=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=.
-OutputBaseFilename=CeratopsKeyboardLayout-Setup
+OutputBaseFilename=CeratopsKeyboardLayout-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=CeratopsKeyboardLayout.ico
 UninstallDisplayIcon={app}\CeratopsKeyboardLayout.exe
-VersionInfoCompany={#AppName}
-VersionInfoDescription={#AppName} Setup
+VersionInfoCompany={#AppPublisher}
+VersionInfoDescription={#AppName} installer
+VersionInfoCopyright={#AppCopyright}
 VersionInfoProductName={#AppName}
 VersionInfoProductVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}

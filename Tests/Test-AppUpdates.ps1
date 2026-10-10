@@ -40,10 +40,10 @@ function New-ReleaseFixture {
     return [pscustomobject]@{
         tag_name = 'v' + $Version; draft = $false; prerelease = $false
         assets = @([pscustomobject]@{
-            name = 'CeratopsKeyboardLayout-Setup.exe'; size = 12
+            name = "CeratopsKeyboardLayout-Setup-$Version.exe"; size = 12
             digest = 'sha256:' + ('a' * 64)
             browser_download_url = 'https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases/download/v' +
-                $Version + '/CeratopsKeyboardLayout-Setup.exe'
+                $Version + "/CeratopsKeyboardLayout-Setup-$Version.exe"
         })
     }
 }
@@ -150,6 +150,17 @@ try {
             Assert-Fails { ConvertFrom-InstallerRelease $fixture }
         }
         Assert-Fails { ConvertFrom-InstallerRelease (New-ReleaseFixture) (ConvertTo-AppVersion '1.0.12') }
+    }
+    Test-Case 'versioned asset matches each release tag and download URL' {
+        foreach ($versionText in @('1.0.12', '1.0.13', '2.3.4')) {
+            $fixture = New-ReleaseFixture $versionText
+            $release = ConvertFrom-InstallerRelease $fixture (ConvertTo-AppVersion $versionText)
+            Assert-Equal $release.Uri.AbsoluteUri (
+                'https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases/download/v' +
+                $versionText + "/CeratopsKeyboardLayout-Setup-$versionText.exe") 'Versioned installer URL'
+            $fixture.assets[0].name = 'CeratopsKeyboardLayout-Setup-9.9.9.exe'
+            Assert-Fails { ConvertFrom-InstallerRelease $fixture }
+        }
     }
     Test-Case 'unsafe or incomplete metadata' {
         foreach ($property in @('name', 'digest', 'browser_download_url', 'size')) {
