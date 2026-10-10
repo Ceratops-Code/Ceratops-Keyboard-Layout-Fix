@@ -75,6 +75,7 @@ function New-UpgradeFixture {
     $state = [pscustomobject]@{
         Version = (ConvertTo-AppVersion '1.0.10'); Target = (ConvertTo-AppVersion '1.0.11')
         Calls = [Collections.Generic.List[string]]::new(); Mode = ''; Reads = 0
+        InstallDirectories = [Collections.Generic.List[string]]::new()
     }
     $operations = @{
         ReadVersion = {
@@ -108,8 +109,9 @@ function New-UpgradeFixture {
             return & $openCheckedInstaller $path $release
         }.GetNewClosure()
         RunSetup = {
-            param($path, $recovery)
+            param($path, $recovery, $directory)
             $state.Calls.Add('setup:' + $recovery)
+            $state.InstallDirectories.Add($directory)
             if ($recovery) {
                 if ($state.Mode -eq 'RecoveryFailure') { return 5 }
                 $state.Version = & $convertAppVersion '1.0.10'
@@ -128,8 +130,9 @@ function New-UpgradeFixture {
 }
 
 function Invoke-UpgradeFixture {
-    param($Fixture, [string]$Cache = (Join-Path $testRoot ([guid]::NewGuid().ToString('N'))))
-    return Invoke-AppUpgrade 'fixture-install' $Fixture.State.Target $Cache $Fixture.Operations
+    param($Fixture, [string]$Cache = (Join-Path $testRoot ([guid]::NewGuid().ToString('N'))),
+        [string]$InstallDirectory = 'fixture-install')
+    return Invoke-AppUpgrade $InstallDirectory $Fixture.State.Target $Cache $Fixture.Operations
 }
 
 try {
@@ -245,6 +248,43 @@ try {
             Assert-Equal (Invoke-UpgradeFixture $fixture).Status 'Restored' 'Recovery status'
             Assert-Equal $fixture.State.Calls[$fixture.State.Calls.Count - 1] 'setup:True' 'Recovery ran'
             Assert-Equal $fixture.State.Version (ConvertTo-AppVersion '1.0.10') 'Previous version restored'
+        }
+    }
+    Test-Case 'upgrade and recovery retain the current install directory' {
+        $directory = Join-Path $testRoot 'custom installation'
+        foreach ($mode in @('', 'SetupFailure')) {
+            $fixture = New-UpgradeFixture
+            $fixture.State.Mode = $mode
+            $result = Invoke-UpgradeFixture $fixture -InstallDirectory $directory
+            $expected = if ($mode) { 'Restored' } else { 'Upgraded' }
+            Assert-Equal $result.Status $expected 'Custom installation outcome'
+            Assert-Equal $fixture.State.InstallDirectories.Count (1 + [int][bool]$mode) 'Expected installers ran'
+            foreach ($actual in $fixture.State.InstallDirectories) {
+                Assert-Equal $actual $directory 'Installer retains the registered directory'
+            }
+        }
+    }
+    Test-Case 'installer command passes the custom directory as one argument' {
+        & {
+            # Replace only process creation; exercise the production launch code.
+            # This child scope restores the real command before later checks.
+            function Start-Process {
+                param([string]$FilePath, [string]$ArgumentList, [switch]$PassThru)
+                $script:InstallerInvocation = [pscustomobject]@{ Path = $FilePath; Arguments = $ArgumentList }
+                $process = [pscustomobject]@{ ExitCode = 0 }
+                Add-Member -InputObject $process -MemberType ScriptMethod -Name WaitForExit -Value {}
+                Add-Member -InputObject $process -MemberType ScriptMethod -Name Dispose -Value {}
+                return $process
+            }
+            $directory = Join-Path $testRoot 'custom installation'
+            $operations = Get-UpdateOperations
+            foreach ($recovery in @($false, $true)) {
+                Assert-Equal (& $operations.RunSetup 'fixture.exe' $recovery $directory) 0 'Setup exit code'
+                Assert-Equal $script:InstallerInvocation.Path 'fixture.exe' 'Exact installer path'
+                Assert-Equal ($script:InstallerInvocation.Arguments.Contains(' /DIR="' + $directory + '"')) `
+                    $true 'Quoted directory reaches the installer process'
+            }
+            Assert-Fails { Invoke-InstallerProcess 'fixture.exe' $false 'unsafe"directory' }
         }
     }
     Test-Case 'concurrent newer install cannot be downgraded' {

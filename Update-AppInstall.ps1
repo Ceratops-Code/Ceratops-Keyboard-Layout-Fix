@@ -234,9 +234,15 @@ function New-UpdateAttempt {
 }
 
 function Invoke-InstallerProcess {
-    param([string]$Path, [bool]$Recovery)
+    param([string]$Path, [bool]$Recovery, [string]$InstallDirectory)
+    if (-not $InstallDirectory -or $InstallDirectory -match '["\r\n]') {
+        throw 'The installation directory cannot be passed safely to setup.'
+    }
     $silent = if ($Recovery) { '/VERYSILENT' } else { '/SILENT' }
-    $arguments = "$silent /SUPPRESSMSGBOXES /NORESTART /SP- /CERATOPSUPGRADE=1"
+    # Inno ignores the previous app directory. Pass the registered location to
+    # both installers, quoting spaces and escaping trailing Windows separators.
+    $directoryArgument = '/DIR="{0}"' -f ($InstallDirectory -replace '(\\+)$', '$1$1')
+    $arguments = "$silent /SUPPRESSMSGBOXES /NORESTART /SP- /CERATOPSUPGRADE=1 $directoryArgument"
     $process = Start-Process -FilePath $Path -ArgumentList $arguments -PassThru
     try { $process.WaitForExit(); return $process.ExitCode }
     finally { $process.Dispose() }
@@ -248,7 +254,7 @@ function Get-UpdateOperations {
         ReadVersion = { param($directory) Get-InstalledAppVersion $directory }
         GetRelease = { param($version) Get-GitHubInstallerRelease $version }
         GetPackage = { param($release, $path) Receive-ReleaseInstaller $release $path }
-        RunSetup = { param($path, $recovery) Invoke-InstallerProcess $path $recovery }
+        RunSetup = { param($path, $recovery, $directory) Invoke-InstallerProcess $path $recovery $directory }
     }
 }
 
@@ -274,7 +280,7 @@ function Invoke-AppUpgrade {
             throw 'Another installation changed Ceratops while the update was downloading.'
         }
         $installationStarted = $true
-        $exitCode = & $Operations.RunSetup $upgrade.Path $false
+        $exitCode = & $Operations.RunSetup $upgrade.Path $false $InstallDirectory
         if ($exitCode -ne 0 -or (& $Operations.ReadVersion $InstallDirectory) -ne $Version) {
             throw "The new installer did not complete successfully (exit $exitCode)."
         }
@@ -287,7 +293,7 @@ function Invoke-AppUpgrade {
             return $result
         }
         try {
-            $exitCode = & $Operations.RunSetup $previous.Path $true
+            $exitCode = & $Operations.RunSetup $previous.Path $true $InstallDirectory
             if ($exitCode -ne 0 -or (& $Operations.ReadVersion $InstallDirectory) -ne $current) {
                 throw "The recovery installer did not complete successfully (exit $exitCode)."
             }

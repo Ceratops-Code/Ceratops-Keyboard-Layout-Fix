@@ -19,7 +19,8 @@ once per request and reuses its conversion tables unless that list changes.
 At startup, installed copies check GitHub for a newer stable release and ask
 before upgrading. Ceratops stays usable during the check and downloads. The
 updater prepares both installers first and restores the previous version if
-the new installation fails. Offline checks are quiet; portable copies do not
+the new installation fails. Both installers retain the registered installation
+folder. Offline checks are quiet; portable copies do not
 upgrade the installed app.
 See [the user guide](README.txt) for installation, shortcut behavior,
 editor limitations, and removal.
