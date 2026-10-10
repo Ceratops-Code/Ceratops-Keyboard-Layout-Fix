@@ -18,7 +18,8 @@ shortcut, without restarting Ceratops. It reads Windows' available-layout list
 once per request and reuses its conversion tables unless that list changes.
 At startup, installed copies check GitHub for a newer stable release and ask
 before upgrading. **Check for updates** in the tray menu runs the same check
-on demand and reports when the app is up to date, with a green check, or the check fails.
+on demand and reports when the app is up to date, with a green check, or the
+check fails.
 Ceratops stays usable during the check and downloads. The
 updater prepares both installers first and restores the previous version if
 the new installation fails. Both installers retain the registered installation
