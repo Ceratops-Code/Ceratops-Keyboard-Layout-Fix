@@ -16,6 +16,7 @@ class NativeTextFieldFixture extends NativeTextField {
     SelectAll() => SendMessage(0xB1, 0, -1, this.Control)
 }
 
+testExitCode := 1, testClipboardSequence := 0
 try {
     for test in [
         ["אד", "en", "ts"], ["שלום", "en", "akuo"],
@@ -105,7 +106,13 @@ try {
     inputControl := testGui.AddEdit("w420 r4", "prefix שלום suffix")
     testGui.Show("Hide")
     field := NativeTextFieldFixture(testGui.Hwnd, inputControl.Hwnd)
-    clipBefore := ClipboardAll()
+    ; ClipboardAll can contain volatile bytes even when Windows' sequence is
+    ; unchanged. Own a known fixture and check both its content and sequence;
+    ; restore the user's formats unless another copy replaced our fixture.
+    savedClipboard := ClipboardAll()
+    clipboardFixture := "Ceratops native conversion clipboard fixture"
+    A_Clipboard := clipboardFixture
+    testClipboardSequence := DllCall("GetClipboardSequenceNumber", "UInt")
     ; The unavailable-target entry path must stop before asking even an
     ; unfocused editor to select or copy. Its message makes that ordering
     ; observable without depending on another app allowing window activation.
@@ -163,7 +170,9 @@ try {
     Assert(StrReplace(inputControl.Value, "`r`n", "`n"), "akuo`nhello",
         "Repeated whole field conversion does not append")
     Assert(field.Selection()[1], field.Selection()[2], "Repeated whole field deselected")
-    Assert(DllCall("msvcrt\memcmp", "Ptr", clipBefore, "Ptr", ClipboardAll(), "UPtr", clipBefore.Size, "Int"), 0, "Native clipboard unchanged")
+    Assert(DllCall("GetClipboardSequenceNumber", "UInt"), testClipboardSequence,
+        "Native conversion does not write any clipboard format")
+    Assert(A_Clipboard, clipboardFixture, "Native clipboard content stays unchanged")
     inputControl.Value := "English text"
     SendMessage(0xB1, 0, 7, inputControl.Hwnd)
     field.Convert("en", "en", "selected")
@@ -172,11 +181,18 @@ try {
     inputControl.Value := ""
     field.Convert("he", "en", "all")
     Assert(inputControl.Value, "", "Empty field")
-    testGui.Destroy()
     try FileAppend("PASS " checks " checks`n", "*")
-    ExitApp(0)
+    testExitCode := 0
 } catch Error as failure {
-    try testGui.Destroy()
     try FileAppend("FAIL: " failure.Message " (line " failure.Line ")`n", "*")
-    ExitApp(1)
+} finally {
+    try testGui.Destroy()
+    try {
+        if testClipboardSequence && DllCall("GetClipboardSequenceNumber", "UInt") = testClipboardSequence
+            A_Clipboard := savedClipboard
+    } catch Error as failure {
+        try FileAppend("FAIL: Clipboard restoration: " failure.Message "`n", "*")
+        testExitCode := 1
+    }
 }
+ExitApp(testExitCode)
