@@ -9,8 +9,11 @@ Windows to the chosen keyboard layout.
 Download the standalone Windows installer from
 [GitHub Releases](https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases).
 The installer includes the AutoHotkey runtime and starts Ceratops when you sign
-in. English, Hebrew, and Russian keyboard layouts must already be installed in
-Windows. See [the user guide](README.txt) for installation, shortcut behavior,
+in. It uses whichever of the supported keyboard layouts are installed in
+Windows; missing Hebrew or Russian keyboards do not prevent it from starting.
+A shortcut for an unavailable target shows a brief message and leaves the
+text, selection, clipboard, and active keyboard untouched.
+See [the user guide](README.txt) for installation, shortcut behavior,
 editor limitations, and removal.
 
 | Shortcut | Action |
@@ -26,7 +29,17 @@ under [MIT](LICENSE). The bundled AutoHotkey runtime retains its
 [MIT license](Lib/LICENSE.txt). The Ceratops image assets are not included in
 the source-code MIT grant.
 
-To build the installer, use Inno Setup 6 with
-`CeratopsKeyboardLayout-Setup.iss`. The [user guide](README.txt) lists the
+To build the installer, install the Inno Setup version pinned in
+`dependencies.json`. The SDLC package actions `test`, `build`, and `publish`
+for `ceratops-keyboard-layout-installer` call the repository-owned release
+workflow. It finds the compiler on `PATH` or in its standard Windows installation
+directories, builds `CeratopsKeyboardLayout-Setup.iss`, and creates
+`CeratopsKeyboardLayout-Setup.exe` in the current checkout.
+Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's
+corresponding GPL source archive. Matching draft uploads resume after interruption;
+published assets are never overwritten. The app's SDLC `install` action consumes
+the same successful build and runs setup silently from an administrator terminal.
+Building alone does not publish or install it.
+The [user guide](README.txt) lists the
 desktop regression checks; GitHub CI validates the repository without trying
 to run interactive desktop tests on a hosted runner.

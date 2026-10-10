@@ -8,22 +8,21 @@ global IUIAutomationActivateScreenReader := 0
 
 global Converter := KeyboardConverter()
 if A_LineFile = A_ScriptFullPath {
-    A_IconTip := "Ceratops Keyboard Layout: E/H/R selects text; double tap converts all"
+    A_IconTip := "Ceratops Keyboard Layout: single tap converts selection; double tap converts all"
     TraySetIcon(A_ScriptDir "\CeratopsKeyboardLayout.ico")
     ; The portable install has no AutoHotkey helper apps such as Window Spy.
     A_TrayMenu.Delete()
     A_TrayMenu.Add("Exit Ceratops Keyboard Layout", (*) => ExitApp())
-    ; Virtual keys keep the shortcuts on the same keys in all three layouts.
-    Hotkey("^!vk45", (*) => HandleConversionShortcut("en", "vk45"))
-    Hotkey("^!vk48", (*) => HandleConversionShortcut("he", "vk48"))
-    Hotkey("^!vk52", (*) => HandleConversionShortcut("ru", "vk52"))
+    ; Bind the target now: loop variables must not be captured by reference.
+    for name, language in KeyboardConverter.Languages
+        Hotkey("^!" language.Key, HandleConversionShortcut.Bind(name, language.Key))
 }
 
 ; Waiting for the first release prevents key auto-repeat from becoming a
 ; double tap. The second physical press must arrive within 350 ms while both
 ; modifiers remain down. #MaxThreadsPerHotkey suppresses a second callback
 ; while KeyWait observes that press.
-HandleConversionShortcut(target, key) {
+HandleConversionShortcut(target, key, *) {
     window := WinExist("A")
     KeyWait(key)
     doubleTap := KeyWait(key, "D T0.35") && GetKeyState("Ctrl") && GetKeyState("Alt")
@@ -31,30 +30,56 @@ HandleConversionShortcut(target, key) {
 }
 
 class KeyboardConverter {
-    __New() {
+    ; The only language registry. Shortcuts, layout discovery, script detection
+    ; and source counting all consume these definitions; maps use installed
+    ; layouts only. Missing keyboards never prevent the tray app from starting.
+    static Languages := Map(
+        "en", {Name: "US English", LanguageId: 0x0409, Key: "vk45",
+            ScriptRanges: [[0x41, 0x5A], [0x61, 0x7A]]},
+        "he", {Name: "Hebrew", LanguageId: 0x040D, Key: "vk48",
+            ScriptRanges: [[0x0590, 0x05FF]]},
+        "ru", {Name: "Russian", LanguageId: 0x0419, Key: "vk52",
+            ScriptRanges: [[0x0400, 0x052F], [0x2116, 0x2116]]})
+    static ShiftStates := [false, true]
+
+    ; An explicit handle snapshot also lets tests cover missing keyboards
+    ; without changing the person's Windows language settings.
+    __New(installedLayouts := unset) {
         this.Layouts := Map()
-        count := DllCall("GetKeyboardLayoutList", "Int", 0, "Ptr", 0, "Int")
-        layouts := Buffer(count * A_PtrSize)
-        DllCall("GetKeyboardLayoutList", "Int", count, "Ptr", layouts)
-        names := Map(0x0409, "en", 0x040D, "he", 0x0419, "ru")
-        Loop count {
-            handle := NumGet(layouts, (A_Index - 1) * A_PtrSize, "UPtr")
-            language := handle & 0xFFFF
-            if names.Has(language) && !this.Layouts.Has(names[language])
-                this.Layouts[names[language]] := handle
+        for handle in IsSet(installedLayouts) ? installedLayouts : KeyboardConverter.InstalledLayoutHandles() {
+            for name, language in KeyboardConverter.Languages {
+                if (handle & 0xFFFF) = language.LanguageId && !this.Layouts.Has(name)
+                    this.Layouts[name] := handle
+            }
         }
-        for name in ["en", "he", "ru"]
-            if !this.Layouts.Has(name)
-                throw Error("The " name " keyboard layout must be installed in Windows.")
-        this.Maps := Map()
-        for name in ["en", "he", "ru"]
+        this.Maps := Map(), this.SymbolMaps := Map()
+        for name in this.Layouts
             this.Maps[name] := this.BuildMap(name)
-        this.SymbolMaps := Map()
-        for source in ["en", "he", "ru"] {
+        for source in this.Layouts {
             this.SymbolMaps[source] := Map()
-            for target in ["en", "he", "ru"]
+            for target in this.Layouts
                 this.SymbolMaps[source][target] := this.BuildSymbolMap(source, target)
         }
+    }
+
+    static InstalledLayoutHandles() {
+        result := []
+        count := DllCall("GetKeyboardLayoutList", "Int", 0, "Ptr", 0, "Int")
+        if count <= 0
+            return result
+        layouts := Buffer(count * A_PtrSize)
+        count := DllCall("GetKeyboardLayoutList", "Int", count, "Ptr", layouts, "Int")
+        Loop count
+            result.Push(NumGet(layouts, (A_Index - 1) * A_PtrSize, "UPtr"))
+        return result
+    }
+
+    RequireInstalledLayout(target) {
+        if this.Layouts.Has(target)
+            return this.Layouts[target]
+        name := KeyboardConverter.Languages.Has(target)
+            ? KeyboardConverter.Languages[target].Name : target
+        throw Error(name " keyboard layout is not installed. Install it in Windows to use this shortcut.")
     }
 
     ; Map actual Windows layout output back through a physical scan code.
@@ -71,12 +96,10 @@ class KeyboardConverter {
 
     ScriptOf(character) {
         code := Ord(character)
-        if code >= 0x0590 && code <= 0x05FF
-            return "he"
-        if (code >= 0x0400 && code <= 0x052F) || code = 0x2116
-            return "ru"
-        if (code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A)
-            return "en"
+        for name, language in KeyboardConverter.Languages
+            for bounds in language.ScriptRanges
+                if code >= bounds[1] && code <= bounds[2]
+                    return name
         return ""
     }
 
@@ -89,7 +112,7 @@ class KeyboardConverter {
             ; Main typing area only: no numpad, navigation or control keys.
             Loop 0x35 {
                 scan := A_Index
-                for shifted in [false, true] {
+                for shifted in KeyboardConverter.ShiftStates {
                     from := this.KeyText(layout, scan, shifted)
                     if from = "" || this.ScriptOf(from) != source || result.Has(from)
                         continue
@@ -118,7 +141,7 @@ class KeyboardConverter {
             return result
         Loop 0x35 {
             scan := A_Index
-            for shifted in [false, true] {
+            for shifted in KeyboardConverter.ShiftStates {
                 from := this.KeyText(this.Layouts[source], scan, shifted)
                 if from = "" || Ord(from) < 0x21 || this.ScriptOf(from) != ""
                     || RegExMatch(from, "^[0-9]$") || result.Has(from)
@@ -132,20 +155,27 @@ class KeyboardConverter {
     }
 
     DominantSource(text, fallbackSource := "en") {
-        counts := Map("en", 0, "he", 0, "ru", 0)
+        counts := Map()
+        for name in KeyboardConverter.Languages
+            counts[name] := 0
         Loop Parse text {
             source := this.ScriptOf(A_LoopField)
             if counts.Has(source)
                 counts[source] += 1
         }
-        source := counts.Has(fallbackSource) ? fallbackSource : "en"
-        for candidate in ["en", "he", "ru"]
-            if counts[candidate] > counts[source]
+        source := this.Layouts.Has(fallbackSource) ? fallbackSource : ""
+        for candidate in this.Layouts {
+            if source = ""
+                source := candidate
+        }
+        for candidate, count in counts
+            if count && (source = "" || count > counts[source])
                 source := candidate
         return source
     }
 
     Convert(text, target, fallbackSource := "en") {
+        this.RequireInstalledLayout(target)
         source := this.DominantSource(text, fallbackSource)
         result := "", mapping := this.Maps[target]
         position := 1, protectedMarkerEnd := 0
@@ -165,9 +195,13 @@ class KeyboardConverter {
             } else if characterSource != "" {
                 source := characterSource
                 result .= mapping.Has(character) ? mapping[character] : character
-            } else {
+            } else if this.SymbolMaps.Has(source) {
                 symbols := this.SymbolMaps[source][target]
                 result .= symbols.Has(character) ? symbols[character] : character
+            } else {
+                ; Text from an absent source keyboard, including its symbols,
+                ; stays intact because no installed layout can map its keys.
+                result .= character
             }
             position += StrLen(character)
         }
@@ -435,10 +469,17 @@ ConvertFocusedText(target, window, behavior) {
 }
 
 ConvertOneFocusedText(target, window, behavior) {
-    failureMessage := ""
+    global Converter
+    failureMessage := "", canSwitch := false
     try {
+        ; Reject an unavailable target before asking an editor to select or copy.
+        Converter.RequireInstalledLayout(target)
+        canSwitch := true
         ; Avoid sending Ctrl+A/V while the invoking modifiers are still down.
-        for key in ["Ctrl", "Alt", "e", "h", "r"]
+        keys := ["Ctrl", "Alt"]
+        for name, language in KeyboardConverter.Languages
+            keys.Push(language.Key)
+        for key in keys
             if !KeyWait(key, "T2")
                 throw Error("Release the shortcut keys, then try again.")
         if !WinActive("ahk_id " window)
@@ -450,9 +491,11 @@ ConvertOneFocusedText(target, window, behavior) {
     } finally {
         ; The shortcut chooses its language even when there is no editable text.
         ; Never direct a late request to another window if focus has moved.
-        try SwitchInputLanguage(window, target)
-        catch Error as failure {
-            failureMessage .= (failureMessage = "" ? "" : "`n") failure.Message
+        if canSwitch {
+            try SwitchInputLanguage(window, target)
+            catch Error as failure {
+                failureMessage .= (failureMessage = "" ? "" : "`n") failure.Message
+            }
         }
         if failureMessage != "" {
             ToolTip(failureMessage)
@@ -484,7 +527,7 @@ SwitchInputLanguage(window, target) {
     thread := DllCall("GetWindowThreadProcessId", "Ptr", recipient, "Ptr", 0, "UInt")
     if !thread
         throw Error("Windows could not identify the focused app's input thread.")
-    layout := Converter.Layouts[target]
+    layout := Converter.RequireInstalledLayout(target)
     language := layout & 0xFFFF
     current := DllCall("GetKeyboardLayout", "UInt", thread, "Ptr")
     if (current & 0xFFFF) = language

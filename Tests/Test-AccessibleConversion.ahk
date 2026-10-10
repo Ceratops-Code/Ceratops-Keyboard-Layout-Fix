@@ -38,8 +38,10 @@ if A_Args.Length && A_Args[1] = "--collapse-only" {
 }
 
 checks := 0
-; Route fixture selection and paste to its own HWND, so this check never
-; steals focus from a person typing. Real keys remain covered by the hotkey test.
+; Route fixture selection and replacement to its own HWND without stealing
+; focus. Populate/read the clipboard in this process: background WM_COPY and
+; WM_PASTE silently fail when another clipboard reader briefly holds it open.
+; Real editor keyboard transport remains covered by the hotkey test.
 class FixtureTextField extends AccessibleTextField {
     __New(window, control, element) {
         this.Control := control
@@ -56,17 +58,19 @@ class FixtureTextField extends AccessibleTextField {
     Paste() {
         rich := RichClipboard.ReadHtml()
         this.PastedFragment := rich ? rich.fragment : ""
-        SendMessage(0x302, 0, 0, this.Control)
+        pasteText := A_Clipboard
+        SendMessage(0xC2, 1, StrPtr(pasteText), this.Control)
     }
     Copy() {
-        SendMessage(0x301, 0, 0, this.Control)
+        copiedText := this.GetRange().GetText()
         if this.RichFragment != "" {
             parts := {before: "<html><body><!--StartFragment-->",
                 after: "<!--EndFragment--></body></html>"}
             html := RichClipboard.Build(parts, this.RichFragment)
             sequence := DllCall("GetClipboardSequenceNumber", "UInt")
-            RichClipboard.Write(this.CopyPrefix A_Clipboard, html, &sequence)
-        }
+            RichClipboard.Write(this.CopyPrefix copiedText, html, &sequence)
+        } else
+            A_Clipboard := copiedText
     }
     SelectAll() {
         this.SelectAllCalls += 1

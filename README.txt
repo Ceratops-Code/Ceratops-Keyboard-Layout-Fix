@@ -33,8 +33,14 @@ existing item, so the bullet is not duplicated. If that wrapper is unusual,
 it pastes plain converted words inside the item to keep the list structure.
 If a rich editor provides no usable HTML copy, conversion stops.
 
-Conversion uses the three installed Windows layouts. Shift/capitalization is
-preserved between English and Russian; Hebrew letters have no capitals.
+Conversion uses whichever supported Windows layouts are present at startup.
+The app still starts when Hebrew, Russian, or US English is absent. Only
+installed layouts participate in conversion. A shortcut for a missing target
+shows a brief message without selecting text, changing it, touching the
+clipboard, or switching the keyboard. Text and symbols from an absent source
+layout are preserved. Restart Ceratops after adding or removing a keyboard.
+Shift/capitalization is preserved between English and Russian; Hebrew letters
+have no capitals.
 Text is processed only in memory, without network requests or saved text logs.
 The clipboard is preserved unless the user copies something new concurrently.
 
@@ -68,8 +74,8 @@ the original user token when available. After sign-in, that fallback cannot
 edit administrator-run apps. Remove the installation through Windows
 Settings > Apps. Uninstall stops and removes the service or Startup shortcut.
 Uninstall an older per-user version first if one exists, to avoid two copies.
-US English, Hebrew Standard and Russian keyboard layouts must be installed
-in Windows separately.
+Install the Windows keyboard layouts you want to use separately; the
+installer does not add languages or require all supported keyboards.
 
 To run the unpacked copy instead, launch CeratopsKeyboardLayout.exe with
 CeratopsKeyboardLayout.ahk as its argument.
@@ -92,10 +98,26 @@ shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
 The project folder owns CeratopsKeyboardLayout-Setup.iss and a local current
 standalone setup executable. The setup executable is excluded from Git and
-published as a GitHub Release asset. Inno Setup 6's ISCC.exe compiles the
-script to a temporary output directory; only a successful build replaces the
-local setup executable. Temporary compiler and output files are removed after
-the build.
+published as a GitHub Release asset. SDLC calls scripts\release-installer.py
+for build, publication and installation. The Inno Setup version is pinned in
+dependencies.json. The helper finds ISCC.exe on PATH or in its standard Windows
+installation directories. It compiles CeratopsKeyboardLayout-Setup.iss into a
+private staging bundle and obtains the checksum-pinned AutoHotkey source ZIP.
+Only successful bundles replace the current setup executable.
+The primary checkout's .build\installer directory owns one lock and at most
+three completed build bundles. Packaging bytes and compiler identity identify
+each bundle; changing only tests or CI does not rebuild an accepted installer.
+Each bundle contains the installer, GPL source ZIP and its build receipt.
+At startup the owning helper removes abandoned staging bundles under its lock;
+after each build or reuse it prunes all but the current bundle and two others.
+It removes private staging and atomic-copy files after success or failure and
+creates no operational history. Failed compilation leaves the previous setup.
+Publication requires a successful current build and authenticated GitHub CLI.
+It resumes matching draft uploads, checks the tag's source commit and uploaded
+checksums, and publishes only after both required assets are present. Published
+release assets are never replaced or deleted; each keeps its version identity.
+The app's SDLC install action consumes that successful build, runs setup silently,
+and requires an administrator terminal. Building does not install or publish it.
 The running utility creates no files, output versions, checkpoints or logs.
 Maps and clipboard backups exist in memory and are released after use/exit.
 Setup's one-time SYSTEM test task and its XML/result files live in the
@@ -103,10 +125,17 @@ installer's temporary directory and are removed immediately after the test.
 They do not persist across restarts.
 Regression checks create temporary test windows and close them on completion.
 They restore the prior foreground window and clipboard where applicable.
+Tests\test_installer_release.py checks build failure preservation, cache reuse,
+bounded retention, upload interruption, and published-asset protection without
+installing software or accessing GitHub. Local SDLC and GitHub CI run the same
+test entrypoint. Its private test files are removed from the caller-selected
+task temp root, or the repository parent's tmp project test directory.
 
 Validation
-Tests\Test-KeyConversion.ahk exercises the layout maps, list markers, selected
-and whole-field conversion, undo, clipboard preservation and deselection.
+Tests\Test-KeyConversion.ahk exercises the layout maps, every installed-layout
+subset, list markers, selected and whole-field conversion, undo, clipboard
+preservation and deselection. The test PC needs all supported layouts to
+exercise real Win32 key output; subset checks simulate missing keyboards.
 Tests\Test-AccessibleConversion.ahk checks selected-text accessibility, rich
 list clipboard conversion, duplicate-marker prevention, unsafe-rich-copy
 refusal, and paste in a background
