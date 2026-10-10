@@ -68,10 +68,9 @@ the source-code MIT grant.
 Current releases are unsigned. The project is preparing an application to
 [SignPath Foundation](https://signpath.org/); signing is not yet enabled.
 
-The project maintainer and code reviewer is
+The project maintainer, code reviewer, and release-signing approver is
 [RomanOstr](https://github.com/RomanOstr), as recorded in
-[CODEOWNERS](.github/CODEOWNERS). RomanOstr is also the proposed release-signing
-approver; that role and account security must be confirmed before enrollment.
+[CODEOWNERS](.github/CODEOWNERS).
 All signing-team accounts must use multifactor authentication on GitHub and
 SignPath. Every release-signing request will require manual approval.
 
