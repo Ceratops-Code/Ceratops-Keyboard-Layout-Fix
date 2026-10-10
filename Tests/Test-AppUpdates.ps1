@@ -67,6 +67,11 @@ function Open-GitHubResponse {
 }
 
 function New-UpgradeFixture {
+    # Closures live in dynamic modules. Capture the helper blocks explicitly so
+    # invoking this suite as a child script (as CI does) needs no global functions.
+    $convertAppVersion = ${function:ConvertTo-AppVersion}
+    $formatAppVersion = ${function:Get-AppVersionText}
+    $openCheckedInstaller = ${function:Open-CheckedInstaller}
     $state = [pscustomobject]@{
         Version = (ConvertTo-AppVersion '1.0.10'); Target = (ConvertTo-AppVersion '1.0.11')
         Calls = [Collections.Generic.List[string]]::new(); Mode = ''; Reads = 0
@@ -76,7 +81,7 @@ function New-UpgradeFixture {
             param($directory)
             $state.Reads++
             if ($state.Mode -eq 'ConcurrentInstall' -and $state.Reads -gt 1) {
-                $state.Version = ConvertTo-AppVersion '1.0.12'
+                $state.Version = & $convertAppVersion '1.0.12'
             }
             return $state.Version
         }.GetNewClosure()
@@ -84,13 +89,13 @@ function New-UpgradeFixture {
             param($version)
             $state.Calls.Add("release:$version")
             if ($state.Mode -eq 'MissingRollback' -and $version -eq '1.0.10') { throw 'Release missing' }
-            return [pscustomobject]@{ Version = (ConvertTo-AppVersion $version) }
+            return [pscustomobject]@{ Version = (& $convertAppVersion $version) }
         }.GetNewClosure()
         GetPackage = {
             param($release, $path)
             $state.Calls.Add('package:' + [IO.Path]::GetFileName($path))
             if ($state.Mode -eq 'DownloadFailure') { throw 'Download failed' }
-            $bytes = [Text.Encoding]::UTF8.GetBytes((Get-AppVersionText $release.Version))
+            $bytes = [Text.Encoding]::UTF8.GetBytes((& $formatAppVersion $release.Version))
             [IO.File]::WriteAllBytes($path, $bytes)
             $sha = [Security.Cryptography.SHA256]::Create()
             try {
@@ -100,14 +105,14 @@ function New-UpgradeFixture {
             if ($state.Mode -eq 'BadNewPackage' -and $release.Version -eq $state.Target) {
                 $release.Digest = '0' * 64
             }
-            return Open-CheckedInstaller $path $release
+            return & $openCheckedInstaller $path $release
         }.GetNewClosure()
         RunSetup = {
             param($path, $recovery)
             $state.Calls.Add('setup:' + $recovery)
             if ($recovery) {
                 if ($state.Mode -eq 'RecoveryFailure') { return 5 }
-                $state.Version = ConvertTo-AppVersion '1.0.10'
+                $state.Version = & $convertAppVersion '1.0.10'
                 return 0
             }
             if ($state.Mode -eq 'SetupThrows') { throw 'Setup process failed to start' }
