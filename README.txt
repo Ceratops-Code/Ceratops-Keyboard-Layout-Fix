@@ -33,12 +33,18 @@ existing item, so the bullet is not duplicated. If that wrapper is unusual,
 it pastes plain converted words inside the item to keep the list structure.
 If a rich editor provides no usable HTML copy, conversion stops.
 
-Conversion uses whichever supported Windows layouts are present at startup.
+Conversion uses whichever supported Windows layouts are currently available.
 The app still starts when Hebrew, Russian, or US English is absent. Only
 installed layouts participate in conversion. A shortcut for a missing target
 shows a brief message without selecting text, changing it, touching the
 clipboard, or switching the keyboard. Text and symbols from an absent source
-layout are preserved. Restart Ceratops after adding or removing a keyboard.
+layout are preserved. Adding or removing a keyboard takes effect on the next
+shortcut without restarting Ceratops. Each conversion request reads Windows'
+layout list once before touching the editor or clipboard. Conversion tables
+stay cached unless that list changes; order and duplicate entries do not cause
+a rebuild. A changed list produces a complete replacement cache before it is
+used. A failed query stops that conversion without changing text, selection,
+clipboard or active keyboard. No background polling or watcher is used.
 Shift/capitalization is preserved between English and Russian; Hebrew letters
 have no capitals.
 Text is processed only in memory, without network requests or saved text logs.
@@ -180,7 +186,8 @@ and installer boundaries and never installs software or changes a service.
 Run it with powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
 Tests\Test-AppUpdates.ps1, optionally passing -TempRoot for its private files.
 Tests\Test-KeyConversion.ahk exercises the layout maps, every installed-layout
-subset, list markers, selected and whole-field conversion, undo, clipboard
+subset, live additions/removals, unchanged-cache reuse, failed layout queries,
+list markers, selected and whole-field conversion, undo, clipboard
 preservation and deselection. The test PC needs all supported layouts to
 exercise real Win32 key output; subset checks simulate missing keyboards.
 Tests\Test-AccessibleConversion.ahk checks selected-text accessibility, rich

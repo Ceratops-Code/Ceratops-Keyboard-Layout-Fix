@@ -16,6 +16,22 @@ class NativeTextFieldFixture extends NativeTextField {
     SelectAll() => SendMessage(0xB1, 0, -1, this.Control)
 }
 
+; Change the queried snapshot without changing Windows settings. The real
+; refresh and mapping operations still run, including the shortcut entry path.
+class KeyboardLayoutSnapshotFixture extends KeyboardConverter {
+    __New(handles) {
+        this.CurrentHandles := handles, this.LayoutQueries := 0, this.FailQuery := false
+        super.__New(handles)
+    }
+
+    ReadInstalledLayoutHandles() {
+        this.LayoutQueries += 1
+        if this.FailQuery
+            throw Error("Fixture layout query failed")
+        return this.CurrentHandles
+    }
+}
+
 testExitCode := 1
 try {
     for test in [
@@ -100,6 +116,57 @@ try {
         }
     }
 
+    live := KeyboardLayoutSnapshotFixture([]), allHandles := []
+    for name in KeyboardConverter.Languages {
+        allHandles.Push(Converter.Layouts[name])
+        live.CurrentHandles.Push(Converter.Layouts[name])
+        Assert(live.RefreshInstalledLayouts(), true, "Added keyboard refreshes cached maps")
+        Assert(live.RequireInstalledLayout(name), Converter.Layouts[name], "Added target is immediately available")
+        for source, sample in samples {
+            for target in live.Layouts {
+                expected := live.Layouts.Has(source) ? Converter.Convert(sample, target, source) : sample
+                Assert(live.Convert(sample, target, source), expected,
+                    "Added keyboards participate as both source and target")
+            }
+        }
+    }
+    cachedMaps := live.Maps, cachedSymbols := live.SymbolMaps, cachedLayouts := live.Layouts
+    Assert(live.RefreshInstalledLayouts(), false, "Unchanged layouts need no rebuild")
+    Assert(live.Maps == cachedMaps && live.SymbolMaps == cachedSymbols
+        && live.Layouts == cachedLayouts, true, "Unchanged layouts reuse all cached tables")
+    reordered := []
+    for handle in allHandles
+        reordered.InsertAt(1, handle)
+    reordered.Push(allHandles[1])
+    live.CurrentHandles := reordered
+    Assert(live.RefreshInstalledLayouts(), false, "Order and duplicate handles do not rebuild maps")
+    Assert(live.Maps == cachedMaps, true, "Equivalent snapshots retain the accepted maps")
+    live.FailQuery := true
+    queryFailed := false
+    try live.RefreshInstalledLayouts()
+    catch Error
+        queryFailed := true
+    Assert(queryFailed, true, "A failed layout query is reported")
+    Assert(live.Maps == cachedMaps && live.SymbolMaps == cachedSymbols
+        && live.Layouts == cachedLayouts, true, "Query failure preserves the complete cache")
+    live.FailQuery := false, live.CurrentHandles := allHandles.Clone()
+    for name in KeyboardConverter.Languages {
+        live.CurrentHandles.RemoveAt(1)
+        Assert(live.RefreshInstalledLayouts(), true, "Removed keyboard refreshes cached maps")
+        rejected := false
+        try live.RequireInstalledLayout(name)
+        catch Error
+            rejected := true
+        Assert(rejected, true, "Removed target is immediately unavailable")
+        Assert(live.Maps.Has(name) || live.SymbolMaps.Has(name), false, "Removed keyboard has no stale maps")
+        for source, targets in live.SymbolMaps
+            Assert(targets.Has(name), false, "Removed symbol target has no stale map")
+        for target in live.Layouts
+            Assert(live.Convert(samples[name], target, name), samples[name], "Removed source text stays intact")
+    }
+    Assert(live.Layouts.Count, 0, "Removing every supported keyboard is safe")
+    Assert(live.RefreshInstalledLayouts(), false, "Empty supported set is also cached")
+
     ; Temporary, task-owned window. Exercise the actual native edit operations,
     ; including clipboard preservation, undo and complete-field replacement.
     testGui := Gui(, "Keyboard layout conversion test")
@@ -116,7 +183,8 @@ try {
     ; observable without depending on another app allowing window activation.
     completeConverter := Converter
     try {
-        Converter := KeyboardConverter([])
+        Converter := KeyboardLayoutSnapshotFixture(allHandles.Clone())
+        Converter.CurrentHandles := []
         SendMessage(0xB1, 2, 5, inputControl.Hwnd)
         clipSequence := DllCall("GetClipboardSequenceNumber", "UInt")
         inputThread := DllCall("GetWindowThreadProcessId", "Ptr", inputControl.Hwnd, "Ptr", 0, "UInt")
@@ -135,6 +203,19 @@ try {
             Assert(DllCall("GetKeyboardLayout", "UInt", inputThread, "Ptr"), inputLayout,
                 "Unavailable shortcut leaves the active keyboard alone")
         }
+        Assert(Converter.Layouts.Count, 0, "Shortcut refresh notices removed keyboards")
+        Assert(Converter.LayoutQueries, KeyboardConverter.Languages.Count,
+            "Each shortcut queries layouts exactly once")
+        Converter.CurrentHandles := allHandles.Clone()
+        Converter.FailQuery := true
+        ConvertOneFocusedText(names[1], testGui.Hwnd, "all")
+        Assert(inputControl.Value, "prefix שלום suffix", "Query failure leaves the text alone")
+        Assert(field.Selection()[1], 2, "Query failure preserves selection start")
+        Assert(field.Selection()[2], 5, "Query failure preserves selection end")
+        Assert(DllCall("GetClipboardSequenceNumber", "UInt"), clipSequence,
+            "Query failure leaves the clipboard alone")
+        Assert(DllCall("GetKeyboardLayout", "UInt", inputThread, "Ptr"), inputLayout,
+            "Query failure leaves the active keyboard alone")
     } finally {
         ToolTip()
         Converter := completeConverter

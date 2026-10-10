@@ -13,6 +13,9 @@ in. It uses whichever of the supported keyboard layouts are installed in
 Windows; missing Hebrew or Russian keyboards do not prevent it from starting.
 A shortcut for an unavailable target shows a brief message and leaves the
 text, selection, clipboard, and active keyboard untouched.
+Adding or removing a supported keyboard takes effect on the next conversion
+shortcut, without restarting Ceratops. It reads Windows' available-layout list
+once per request and reuses its conversion tables unless that list changes.
 At startup, installed copies check GitHub for a newer stable release and ask
 before upgrading. Ceratops stays usable during the check and downloads. The
 updater prepares both installers first and restores the previous version if

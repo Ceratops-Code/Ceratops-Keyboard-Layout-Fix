@@ -57,8 +57,9 @@ class KeyboardConverter {
     ; An explicit handle snapshot also lets tests cover missing keyboards
     ; without changing the person's Windows language settings.
     __New(installedLayouts := unset) {
-        this.Layouts := Map()
+        this.Layouts := Map(), this.InstalledHandles := Map()
         for handle in IsSet(installedLayouts) ? installedLayouts : KeyboardConverter.InstalledLayoutHandles() {
+            this.InstalledHandles[handle] := true
             for name, language in KeyboardConverter.Languages {
                 if (handle & 0xFFFF) = language.LanguageId && !this.Layouts.Has(name)
                     this.Layouts[name] := handle
@@ -74,16 +75,61 @@ class KeyboardConverter {
         }
     }
 
+    ReadInstalledLayoutHandles() => KeyboardConverter.InstalledLayoutHandles()
+
+    RefreshInstalledLayouts() {
+        handles := this.ReadInstalledLayoutHandles(), installed := Map()
+        for handle in handles
+            installed[handle] := true
+        unchanged := installed.Count = this.InstalledHandles.Count
+        if unchanged {
+            for handle in installed {
+                if !this.InstalledHandles.Has(handle) {
+                    unchanged := false
+                    break
+                }
+            }
+        }
+        if unchanged
+            return false
+
+        ; Build the complete replacement first. Readers must never see new
+        ; handles paired with old character or symbol maps, even on failure.
+        replacement := KeyboardConverter(handles)
+        previousCritical := A_IsCritical
+        Critical("On")
+        try {
+            this.Layouts := replacement.Layouts
+            this.Maps := replacement.Maps
+            this.SymbolMaps := replacement.SymbolMaps
+            this.InstalledHandles := replacement.InstalledHandles
+        } finally {
+            Critical(previousCritical)
+        }
+        return true
+    }
+
     static InstalledLayoutHandles() {
-        result := []
         count := DllCall("GetKeyboardLayoutList", "Int", 0, "Ptr", 0, "Int")
         if count <= 0
-            return result
-        layouts := Buffer(count * A_PtrSize)
-        count := DllCall("GetKeyboardLayoutList", "Int", count, "Ptr", layouts, "Int")
-        Loop count
-            result.Push(NumGet(layouts, (A_Index - 1) * A_PtrSize, "UPtr"))
-        return result
+            throw Error("Windows could not read the available keyboard layouts.")
+        ; Leave room for an addition between the two calls. A full buffer is
+        ; ambiguous, so grow it rather than accept a possibly truncated list.
+        capacity := count + 1
+        Loop 3 {
+            layouts := Buffer(capacity * A_PtrSize)
+            count := DllCall("GetKeyboardLayoutList", "Int", capacity, "Ptr", layouts, "Int")
+            if count <= 0
+                throw Error("Windows could not read the available keyboard layouts.")
+            if count < capacity {
+                result := []
+                Loop count
+                    result.Push(NumGet(layouts, (A_Index - 1) * A_PtrSize, "UPtr"))
+                return result
+            }
+            capacity *= 2
+        }
+        throw Error("Keyboard layouts are changing. Try the shortcut again.")
     }
 
     RequireInstalledLayout(target) {
@@ -484,6 +530,8 @@ ConvertOneFocusedText(target, window, behavior) {
     global Converter
     failureMessage := "", canSwitch := false
     try {
+        ; Query once per queued conversion, never per character or HTML part.
+        Converter.RefreshInstalledLayouts()
         ; Reject an unavailable target before asking an editor to select or copy.
         Converter.RequireInstalledLayout(target)
         canSwitch := true
