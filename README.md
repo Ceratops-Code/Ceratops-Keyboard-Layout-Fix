@@ -63,6 +63,52 @@ under [MIT](LICENSE). The bundled AutoHotkey runtime retains its
 [MIT license](Lib/LICENSE.txt). The Ceratops image assets are not included in
 the source-code MIT grant.
 
+## Code signing policy
+
+Current releases are unsigned. The project is preparing an application to
+[SignPath Foundation](https://signpath.org/); signing is not yet enabled.
+
+The project maintainer, code reviewer, and release-signing approver is
+[RomanOstr](https://github.com/RomanOstr), as recorded in
+[CODEOWNERS](.github/CODEOWNERS).
+All signing-team accounts must use multifactor authentication on GitHub and
+SignPath. Every release-signing request will require manual approval.
+
+The intended signing scope is the Ceratops installer built from this repository
+on a GitHub-hosted Windows runner. The bundled AutoHotkey runtime is upstream
+software; it will not be submitted for a Ceratops signature without an accepted
+source-build arrangement. Only the approved signed output will be published
+as a signed release. Existing published assets will not be replaced.
+
+If accepted, the project homepage and download pages will display:
+"Free code signing provided by [SignPath.io](https://signpath.io/), certificate
+by [SignPath Foundation](https://signpath.org/)." Windows will identify SignPath
+Foundation as the certificate publisher. This attribution does not claim
+that enrollment has already been approved.
+
+## Privacy policy
+
+Text conversion runs locally on your computer. Ceratops does not upload your
+text, clipboard contents, or key events to GitHub, SignPath, or the maintainers.
+Key combinations are stored locally in the shared settings path described above.
+
+Installed copies contact GitHub when checking for updates at startup or through
+**Check for updates**. An upgrade downloads installers from GitHub only after
+you agree. GitHub receives ordinary connection/request metadata, including your
+IP address, the requested release URL, and the
+`CeratopsKeyboardLayout-Updater` user-agent. See
+[GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
+Conversion does not require a network connection.
+
+The installed application does not contact SignPath. If signing is enabled,
+maintainers will submit build artifacts and signing requests to that service.
+The maintainer application and account are covered by
+[SignPath's privacy policy](https://signpath.io/privacy-policy).
+For privacy questions, contact the maintainer through the project's
+[GitHub profile](https://github.com/RomanOstr).
+
+## Build and release
+
 To build the installer, install the Inno Setup version pinned in
 `dependencies.json`. The SDLC package actions `test`, `build`, and `publish`
 for `ceratops-keyboard-layout-installer` call the repository-owned release
