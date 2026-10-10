@@ -44,8 +44,8 @@ keyboards, with the combinations aligned on the left. Choose **Change key
 combinations...** or double-click the tray icon to open **Key Combinations**.
 Press a combination in each box and save. The checkbox before the Windows
 symbol and **WinKey +** adds the Windows key; an empty box disables a shortcut.
-The tray icon has no hover tooltip. Its artwork fills the available height;
-Windows controls the tray slot size.
+The tray icon has no hover tooltip. Small icon sizes use a close-up face
+and simplified keyboard to fill more of the Windows tray slot.
 Settings are shared by this installation, in
 `%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini`. They survive upgrades and
 are removed on uninstall. Other running sessions reload them when their tray

@@ -18,8 +18,8 @@ if A_LineFile = A_ScriptFullPath {
 InitializeAppTray(iconFile, setIcon := TraySetIcon, clearTooltip := HideAppTrayTooltip) {
     ; Optional callbacks let tests interrupt either native effect in isolation.
     ; TraySetIcon selects the ICO's small image at Windows' tray dimensions.
-    ; The artwork already fills that height; larger source pixels cannot grow
-    ; the shell-owned slot. Freeze the same artwork during pause/suspend.
+    ; Small ICO frames use a close-up face and keyboard for clearer tray
+    ; visibility. Freeze the same artwork during pause/suspend.
     setIcon(iconFile, 1, true)
     clearTooltip()
     ; Explorer recreates the icon with AHK's default tooltip after a restart.
