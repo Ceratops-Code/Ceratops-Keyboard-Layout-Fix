@@ -16,15 +16,20 @@ if A_LineFile = A_ScriptFullPath {
     StartAppUpdateCheck()
 }
 
-StartAppUpdateCheck() {
+StartAppUpdateCheck(manual := false, launch := Run) {
     ; Setup suppresses only its own immediate restart. Future Windows sign-ins
     ; and manual launches check normally. The separate helper cannot block keys.
     for argument in A_Args
-        if argument = "--skip-update-check"
+        if !manual && argument = "--skip-update-check"
             return
-    try Run('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
+    try launch('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
         . ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
-        . A_ScriptDir '\Update-AppInstall.ps1"', A_ScriptDir, "Hide")
+        . A_ScriptDir '\Update-AppInstall.ps1"' . (manual ? ' -Manual' : ''), A_ScriptDir, "Hide")
+    catch Error as failure {
+        if manual
+            MsgBox("Could not start the update check.`n`n" failure.Message,
+                "Ceratops Keyboard Layout", "Icon!")
+    }
 }
 
 class KeyboardConverter {

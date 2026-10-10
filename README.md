@@ -17,10 +17,12 @@ Adding or removing a supported keyboard takes effect on the next conversion
 shortcut, without restarting Ceratops. It reads Windows' available-layout list
 once per request and reuses its conversion tables unless that list changes.
 At startup, installed copies check GitHub for a newer stable release and ask
-before upgrading. Ceratops stays usable during the check and downloads. The
+before upgrading. **Check for updates** in the tray menu runs the same check
+on demand and reports when the app is up to date or the check fails.
+Ceratops stays usable during the check and downloads. The
 updater prepares both installers first and restores the previous version if
 the new installation fails. Both installers retain the registered installation
-folder. Offline checks are quiet; portable copies do not
+folder. Offline startup checks are quiet; portable copies do not
 upgrade the installed app.
 Installer filenames include their version, such as
 `CeratopsKeyboardLayout-Setup-1.0.12.exe`. Install version 1.0.12 manually when

@@ -207,7 +207,7 @@ try {
     }
     Test-Case 'startup without installation, offline, current, older and declined' {
         foreach ($mode in @('Unregistered', 'Offline', 'Current', 'Older', 'Declined')) {
-            $state = [pscustomobject]@{ Mode = $mode; Requests = 0; Prompts = 0; Installs = 0 }
+            $state = [pscustomobject]@{ Mode = $mode; Requests = 0; Prompts = 0; Installs = 0; Notices = 0 }
             $ops = @{
                 ReadVersion = { param($directory)
                     if ($state.Mode -ne 'Unregistered') { return ConvertTo-AppVersion '1.0.10' }
@@ -219,10 +219,12 @@ try {
                     return [pscustomobject]@{ Version = (ConvertTo-AppVersion $v) }
                 }
             }
-            Invoke-StartupUpdateCheck 'fixture-install' $ops `
-                { param($message) $state.Prompts++; return $false } { param($v) $state.Installs++ }
+            Invoke-AppUpdateCheck 'fixture-install' $ops `
+                { param($message) $state.Prompts++; return $false } { param($v) $state.Installs++ } `
+                -Notify { param($message) $state.Notices++ }
             Assert-Equal $state.Installs 0 'No unwanted installations'
             Assert-Equal $state.Prompts ([int]($mode -eq 'Declined')) 'Only newer stable versions prompt'
+            Assert-Equal $state.Notices 0 'Routine startup outcomes stay quiet'
             if ($mode -eq 'Unregistered') { Assert-Equal $state.Requests 0 'Portable copy does not access GitHub' }
         }
     }
@@ -232,9 +234,49 @@ try {
             ReadVersion = { param($directory) ConvertTo-AppVersion '1.0.10' }
             GetRelease = { param($version) [pscustomobject]@{ Version = (ConvertTo-AppVersion '1.0.11') } }
         }
-        Invoke-StartupUpdateCheck 'fixture-install' $ops { param($message) return $true } `
+        Invoke-AppUpdateCheck 'fixture-install' $ops { param($message) return $true } `
             { param($version) $state.Version = $version }
         Assert-Equal $state.Version (ConvertTo-AppVersion '1.0.11') 'Approved version'
+    }
+    Test-Case 'manual check reports outcomes and keeps consent and upgrade handoff' {
+        foreach ($mode in @('Unregistered', 'Offline', 'Current', 'Older', 'Declined', 'Accepted', 'WorkerFailure')) {
+            $state = [pscustomobject]@{ Mode = $mode; Requests = 0; Prompts = 0; Installs = 0
+                Notice = ''; Version = $null }
+            $ops = @{
+                ReadVersion = { param($directory)
+                    if ($state.Mode -ne 'Unregistered') { return ConvertTo-AppVersion '1.0.10' }
+                }
+                GetRelease = { param($version)
+                    $state.Requests++
+                    if ($state.Mode -eq 'Offline') { throw 'Offline fixture' }
+                    $v = switch ($state.Mode) { Current { '1.0.10' }; Older { '1.0.9' }; default { '1.0.11' } }
+                    return [pscustomobject]@{ Version = (ConvertTo-AppVersion $v) }
+                }
+            }
+            Invoke-AppUpdateCheck 'fixture-install' $ops `
+                { param($message) $state.Prompts++; return $state.Mode -ne 'Declined' } `
+                { param($version)
+                    $state.Installs++; $state.Version = $version
+                    if ($state.Mode -eq 'WorkerFailure') { throw 'Worker could not start' }
+                } -Manual -Notify { param($message) $state.Notice = $message }
+            Assert-Equal $state.Prompts ([int]($mode -in @('Declined', 'Accepted', 'WorkerFailure'))) 'Only newer versions prompt'
+            Assert-Equal $state.Installs ([int]($mode -in @('Accepted', 'WorkerFailure'))) 'No upgrade without consent'
+            if ($mode -eq 'Unregistered') {
+                Assert-Equal $state.Requests 0 'Portable manual check does not access GitHub'
+                Assert-Equal ($state.Notice.Contains('installed Ceratops')) $true 'Unregistered result shown'
+            } elseif ($mode -eq 'Offline') {
+                Assert-Equal ($state.Notice.StartsWith('Could not check for updates.')) $true 'Network failure shown'
+            } elseif ($mode -in @('Current', 'Older')) {
+                Assert-Equal $state.Notice 'Ceratops Keyboard Layout 1.0.10 is up to date.' 'Current version shown'
+            } elseif ($mode -eq 'WorkerFailure') {
+                Assert-Equal $state.Notice 'Upgrade failed. The current version was not changed.' 'Launch failure shown'
+            } else {
+                Assert-Equal $state.Notice '' 'No misleading extra outcome'
+            }
+            if ($state.Installs) {
+                Assert-Equal $state.Version (ConvertTo-AppVersion '1.0.11') 'Exact approved release handed off'
+            }
+        }
     }
     Test-Case 'preparation failure preserves old installation' {
         foreach ($mode in @('MissingRollback', 'DownloadFailure', 'BadNewPackage')) {

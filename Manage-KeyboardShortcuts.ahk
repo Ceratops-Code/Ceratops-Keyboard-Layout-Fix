@@ -352,6 +352,7 @@ class KeyboardShortcutManager {
         A_TrayMenu.Add("Change shortcuts...", this.ShowSettings.Bind(this))
         if !this.Converter.Layouts.Count
             A_TrayMenu.Disable("Change shortcuts...")
+        A_TrayMenu.Add("Check for updates", (*) => StartAppUpdateCheck(true))
         A_TrayMenu.Add()
         A_TrayMenu.Add("Exit Ceratops Keyboard Layout", (*) => ExitApp())
     }

@@ -2,7 +2,7 @@
 # recovery. Windows PowerShell 5.1 is sufficient; no account or extra runtime is
 # needed. Dot-source this file to exercise its operations without starting them.
 [CmdletBinding()]
-param([switch]$Apply, [string]$TargetVersion)
+param([switch]$Apply, [string]$TargetVersion, [switch]$Manual)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -404,23 +404,36 @@ function Start-UpgradeWorker {
     finally { $process.Dispose() }
 }
 
-function Invoke-StartupUpdateCheck {
+function Invoke-AppUpdateCheck {
     param([string]$InstallDirectory = $PSScriptRoot,
         [hashtable]$Operations = (Get-UpdateOperations),
         [scriptblock]$Prompt = { param($message) Show-UpdateMessage $message -Ask },
-        [scriptblock]$StartUpgrade = { param($version) Start-UpgradeWorker $version })
-    # Offline, GitHub rate limits and unregistered/portable copies are quiet.
+        [scriptblock]$StartUpgrade = { param($version) Start-UpgradeWorker $version },
+        [switch]$Manual,
+        [scriptblock]$Notify = { param($message) $null = Show-UpdateMessage $message })
+    # Startup stays quiet unless an upgrade is offered. A requested tray check
+    # reports every outcome, but uses the same consent and recovery transaction.
     try {
         $current = & $Operations.ReadVersion $InstallDirectory
-        if ($null -eq $current) { return }
+        if ($null -eq $current) {
+            if ($Manual) { & $Notify 'Run Check for updates from the installed Ceratops application.' }
+            return
+        }
         $release = & $Operations.GetRelease ''
-        if ($release.Version -le $current) { return }
-    } catch { return }
+        if ($release.Version -le $current) {
+            if ($Manual) { & $Notify ('Ceratops Keyboard Layout {0} is up to date.' -f (Get-AppVersionText $current)) }
+            return
+        }
+    } catch {
+        if ($Manual) { & $Notify ('Could not check for updates. The current version was not changed.' +
+            [Environment]::NewLine + [Environment]::NewLine + $_.Exception.Message) }
+        return
+    }
     $message = 'Ceratops Keyboard Layout {0} is available (installed: {1}).{2}{2}Upgrade now? Hotkeys pause briefly during installation.' -f
         (Get-AppVersionText $release.Version), (Get-AppVersionText $current), [Environment]::NewLine
     if (& $Prompt $message) {
         try { & $StartUpgrade $release.Version }
-        catch { $null = Show-UpdateMessage 'Upgrade failed. The current version was not changed.' }
+        catch { & $Notify 'Upgrade failed. The current version was not changed.' }
     }
 }
 
@@ -451,9 +464,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         $startupMutex = $null
         try {
             $startupMutex = Enter-UpdateMutex 'Local\CeratopsKeyboardLayoutUpdateCheck'
-            if ($null -ne $startupMutex) { Invoke-StartupUpdateCheck }
+            if ($null -ne $startupMutex) { Invoke-AppUpdateCheck -Manual:$Manual }
+            elseif ($Manual) { $null = Show-UpdateMessage 'An update check is already running.' }
         } catch {
             # A failed background check must never disable keyboard conversion.
+            if ($Manual) { $null = Show-UpdateMessage ('Could not check for updates. ' + $_.Exception.Message) }
         } finally {
             if ($null -ne $startupMutex) { $startupMutex.ReleaseMutex(); $startupMutex.Dispose() }
         }

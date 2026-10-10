@@ -76,6 +76,25 @@ ShortcutTestDirectory() {
 
 testExitCode := 1
 try {
+    launches := []
+    captureLaunch := (command, directory, display) => launches.Push(
+        {Command: command, Directory: directory, Display: display})
+    StartAppUpdateCheck(false, captureLaunch)
+    StartAppUpdateCheck(true, captureLaunch)
+    Assert(launches.Length, 2, "Startup and tray checks launch the same helper")
+    Assert(InStr(launches[1].Command, " -Manual"), 0, "Startup check stays quiet")
+    Assert(InStr(launches[2].Command, " -Manual") > 0, true, "Tray check requests visible outcomes")
+    Assert(launches[1].Directory, launches[2].Directory, "Both checks use the application directory")
+    Assert(launches[2].Display, "Hide", "Updater has no console window")
+    A_Args.Push("--skip-update-check")
+    try {
+        StartAppUpdateCheck(false, captureLaunch)
+        Assert(launches.Length, 2, "Setup restart skips its automatic check")
+        StartAppUpdateCheck(true, captureLaunch)
+        Assert(launches.Length, 3, "Manual check still works after setup restart")
+    } finally {
+        A_Args.Pop()
+    }
     ; The same language registry drives defaults, visible rows and persistence.
     defaults := KeyboardShortcutSettings.Defaults()
     Assert(defaults.Count, KeyboardConverter.Languages.Count, "One default per supported language")

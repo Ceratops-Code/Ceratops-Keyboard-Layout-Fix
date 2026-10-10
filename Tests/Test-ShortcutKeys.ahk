@@ -20,6 +20,10 @@ class CodexLikeTextField extends AccessibleTextField {
         RichClipboard.Write(A_Clipboard, html, &sequence)
     }
 }
+class NoInstalledLayouts extends KeyboardConverter {
+    __New() => super.__New([])
+    ReadInstalledLayoutHandles() => []
+}
 DismissToolbar(*) {
     global toolbar, toolbarControl
     toolbar.open := false
@@ -28,11 +32,18 @@ DismissToolbar(*) {
 }
 SendDoubleShortcut(key) {
     ; Keep both modifiers down across the two distinct key presses.
-    SendTestKeys("{Ctrl down}{Alt down}{vk" key "}")
+    SendTestKeys("{Blind}{Ctrl DownR}{Alt DownR}{vk" key "}")
     Sleep(80)
-    SendTestKeys("{vk" key "}{Alt up}{Ctrl up}")
+    SendTestKeys("{Blind}{vk" key "}{Alt up}{Ctrl up}")
 }
-SendTestKeys(keys) {
+SendTestKeys(keys, targetWindow := 0) {
+    global fixture
+    if !targetWindow
+        targetWindow := fixture.Hwnd
+    ; Closing the settings dialog can restore its previous foreground window
+    ; asynchronously. Never let a delayed activation send input into user work.
+    if !WinActive("ahk_id " targetWindow)
+        throw Error("Desktop shortcut check interrupted: the test window lost focus before input.")
     ; Exercise AHK's real hooks with input above their level. The converter's
     ; own level-zero sends must never recursively trigger configured shortcuts.
     priorLevel := A_SendLevel
@@ -56,14 +67,14 @@ try {
     settings := KeyboardShortcutSettings(settingsDirectory "\Shortcuts.ini")
     shortcuts := KeyboardShortcutManager(Converter, settings)
     shortcuts.Start()
-    if DllCall("GetMenuItemCount", "Ptr", A_TrayMenu.Handle) != Converter.Layouts.Count + 6
+    if DllCall("GetMenuItemCount", "Ptr", A_TrayMenu.Handle) != Converter.Layouts.Count + 7
         throw Error("Tray menu does not show the installed languages and shortcut help")
     shortcuts.ShowSettings()
     if shortcuts.Controls.Count != Converter.Layouts.Count
         throw Error("Settings dialog shows a keyboard that is not installed")
     for name, control in shortcuts.Controls {
         control.Hotkey.Focus()
-        SendTestKeys("^!{F9}")
+        SendTestKeys("^!{F9}", shortcuts.Dialog.Hwnd)
         if KeyboardShortcutSettings.Parse(control.Hotkey.Value).Hotkey != "^!vk78"
             throw Error("Configured shortcut was intercepted instead of captured in the settings box")
         control.Hotkey.Value := KeyboardShortcutSettings.Parse(shortcuts.Assignments[name]).Control
@@ -86,18 +97,32 @@ try {
         throw Error("Test editor did not become active; foreground=" WinGetProcessName("A")
             " class=" WinGetClass("A") " fixture-visible=" DllCall("IsWindowVisible", "Ptr", fixture.Hwnd))
     Sleep(150)
+    ; Wait for the dialog-close focus handoff before activating the fixture.
+    WinActivate("ahk_id " fixture.Hwnd)
+    if !WinWaitActive("ahk_id " fixture.Hwnd, , 2)
+        throw Error("The test editor could not regain foreground focus.")
     editorThread := DllCall("GetWindowThreadProcessId", "Ptr", inputControl.Hwnd, "Ptr", 0, "UInt")
     priorLayout := DllCall("GetKeyboardLayout", "UInt", editorThread, "Ptr")
     ; A single tap's decision window starts at key-down, while both modifiers
     ; and the key remain held. No key-up is sent until after the assertion.
     SendMessage(0xB1, 0, StrLen(inputControl.Value), inputControl.Hwnd)
-    SendTestKeys("{Ctrl down}{Shift down}{F8 down}")
+    ; DownR models physical modifiers: the converter may release them around
+    ; Ctrl+A/C/V and AHK restores them after each send.
+    SendTestKeys("{Ctrl DownR}{Shift DownR}{F8 down}")
     deadline := A_TickCount + 1000
-    while inputControl.Value != "akuo" && A_TickCount < deadline
+    while inputControl.Value != "akuo" && A_TickCount < deadline {
+        if !WinActive("ahk_id " fixture.Hwnd)
+            throw Error("Held-key shortcut check interrupted: another window took focus.")
         Sleep(10)
+    }
     if inputControl.Value != "akuo"
-        throw Error("Saved shortcut did not convert while its keys were still held")
-    if !GetKeyState("Ctrl") || !GetKeyState("Shift") || !GetKeyState("F8")
+        throw Error("Saved shortcut did not convert while its keys were still held: text="
+            Codes(inputControl.Value) " latch=" shortcuts.HeldKeys.Has("vk77")
+            " pending=" IsObject(shortcuts.Pending) " active=" WinGetProcessName("A")
+            " Ctrl=" GetKeyState("Ctrl") " Shift=" GetKeyState("Shift"))
+    ; The hook suppresses F8, so its logical Windows state stays up. Its latch
+    ; proves no key-up reached the listener before the conversion completed.
+    if !GetKeyState("Ctrl") || !GetKeyState("Shift") || !shortcuts.HeldKeys.Has("vk77")
         throw Error("Held-modifier check did not keep the invoking keys down")
     SendTestKeys("{F8 up}{Shift up}{Ctrl up}")
     shortcuts.Apply(KeyboardShortcutSettings.Defaults())
@@ -110,7 +135,8 @@ try {
         WinActivate("ahk_id " fixture.Hwnd)
         inputControl.Focus()
         if !WinWaitActive("ahk_id " fixture.Hwnd, , 2)
-            throw Error("Test editor lost focus before shortcut")
+            throw Error("Test editor lost focus before shortcut to " WinGetProcessName("A")
+                " (window " WinExist("A") ", fixture " fixture.Hwnd ")")
         if ControlGetFocus("ahk_id " fixture.Hwnd) != inputControl.Hwnd
             throw Error("Test text control is not focused")
         SendDoubleShortcut(key)
@@ -173,7 +199,7 @@ try {
     ; input-language change. Keep the person's actual keyboards untouched.
     completeConverter := Converter
     try {
-        Converter := KeyboardConverter([])
+        Converter := NoInstalledLayouts()
         inputControl.Value := "unchanged text"
         SendMessage(0xB1, 2, 5, inputControl.Hwnd)
         clipboardSequence := DllCall("GetClipboardSequenceNumber", "UInt")
@@ -236,7 +262,10 @@ try {
     code := 1
 } finally {
     ; Always release synthetic input, including when a held-key assertion fails.
-    try SendTestKeys("{F8 up}{Shift up}{vk45 up}{Alt up}{Ctrl up}")
+    try {
+        SendLevel(1)
+        SendEvent("{Blind}{F8 up}{Shift up}{vk45 up}{Alt up}{Ctrl up}")
+    }
     try DllCall("PostMessageW", "Ptr", inputControl.Hwnd, "UInt", 0x50,
         "UPtr", 0, "Ptr", priorLayout)
     try fixture.Destroy()

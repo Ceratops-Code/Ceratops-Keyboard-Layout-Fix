@@ -109,6 +109,10 @@ Choosing No keeps the current version; the next normal start checks again.
 An offline or unavailable GitHub API does not interrupt the app or show errors.
 Only the registered installed copy checks; unpacked source copies skip it.
 The check sends no text or clipboard content to GitHub.
+Choose Check for updates from the green tray icon's menu to check on demand.
+This reports when Ceratops is up to date, the check cannot connect, or another
+check is already running. If a newer stable version is available, it asks
+before downloading and uses the same installation and recovery flow below.
 
 Choosing Yes starts a separate Windows PowerShell helper. A normally launched
 tray app requests administrator approval once for installation; an already
@@ -190,7 +194,7 @@ The conversion code creates no files or text logs. Maps and clipboard backups
 exist in memory and are released after use/exit.
 Update-AppInstall.ps1 owns UpdateCache beside the installed scripts. Under a
 machine-wide upgrade lock it creates a unique attempt directory for the two
-installers. At helper startup it removes abandoned attempts and retains only
+installers. Before each upgrade it removes abandoned attempts and retains only
 the newest failed-recovery attempt while preparing the new one. On completion
 it deletes downloads and temporary attempts; if recovery fails, it keeps only
 that attempt's previous installer and an error record limited to 8 KiB. Later
