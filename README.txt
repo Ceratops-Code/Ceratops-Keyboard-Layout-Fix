@@ -65,7 +65,8 @@ The shortcuts do not make an unsupported custom editor compatible: a caret or
 clipboard copy alone cannot prove that Ctrl+A selected its text.
 
 To install on another 64-bit Windows PC, download
-CeratopsKeyboardLayout-Setup.exe from
+CeratopsKeyboardLayout-Setup-<version>.exe (for example,
+CeratopsKeyboardLayout-Setup-1.0.12.exe) from
 https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases
 and run it. The standalone installer includes
 the runtime and dependencies. It asks for administrator approval once and
@@ -84,6 +85,10 @@ Install the Windows keyboard layouts you want to use separately; the
 installer does not add languages or require all supported keyboards.
 
 Updates
+Version 1.0.12 introduces versioned installer filenames. Install it manually
+when upgrading from an earlier release, whose updater expects the previous
+filename. Later automatic updates use versioned installers for both the new
+version and recovery.
 Each start of an installed tray app checks the public GitHub Releases API for
 a newer stable version and asks whether to upgrade. No account is needed.
 Choosing No keeps the current version; the next normal start checks again.
@@ -128,14 +133,20 @@ The service starts automatically at Windows boot and owns tray companions for
 active desktop sessions; it stops them when removed. The common Startup
 shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
-The project folder owns CeratopsKeyboardLayout-Setup.iss and a local current
-standalone setup executable. The setup executable is excluded from Git and
+The project folder owns CeratopsKeyboardLayout-Setup.iss and versioned
+standalone setup executables. AppVersion in that script owns their filename,
+Windows file/product version, and release tag. Publisher, description,
+copyright and project/support/update links are installer metadata; a trusted
+code signature is separate. Setup executables are excluded from Git and
 published as a GitHub Release asset. SDLC calls scripts\release-installer.py
 for build, publication and installation. The Inno Setup version is pinned in
 dependencies.json. The helper finds ISCC.exe on PATH or in its standard Windows
 installation directories. It compiles CeratopsKeyboardLayout-Setup.iss into a
 private staging bundle and obtains the checksum-pinned AutoHotkey source ZIP.
-Only successful bundles replace the current setup executable.
+Only successful bundles replace the current version's setup executable.
+Each checkout keeps that installer and at most two predecessors. At startup
+and after activation the helper prunes this versioned output group, removes
+abandoned atomic-copy files, and leaves unrelated files untouched.
 The primary checkout's .build\installer directory owns one lock and at most
 three completed build bundles. Packaging bytes and compiler identity identify
 each bundle; changing only tests or CI does not rebuild an accepted installer.

@@ -7,7 +7,9 @@ uploads. This adapter keeps successful build bundles under the primary checkout'
 test or CI edits, identify a build. Only integrity checks are repeated on reuse.
 The directory has one exclusive lock, at most three completed bundles, and no
 operational log. Private incomplete bundles are removed under the lock at startup
-and on failure. Published release assets are never replaced or deleted.
+and on failure. Each checkout keeps its current versioned installer and at most
+two predecessors; orphaned atomic-copy files are removed at startup. Published
+release assets are never replaced or deleted.
 """
 
 from __future__ import annotations
@@ -29,15 +31,51 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
-SETUP_NAME = "CeratopsKeyboardLayout-Setup.exe"
 SETUP_SCRIPT = "CeratopsKeyboardLayout-Setup.iss"
 BUILD_SCHEMA = "ceratops-installer-build.v1"
 BUNDLE_NAME = re.compile(r"[0-9a-f]{64}")
 STAGING_NAME = re.compile(r"\.staging-[0-9a-f]{32}")
+SETUP_FILENAME = re.compile(rf"{re.escape(pathlib.Path(SETUP_SCRIPT).stem)}-\d+\.\d+\.\d+\.exe")
 
 
 class ReleaseError(RuntimeError):
     """An unmet release precondition; no automatic destructive recovery occurs."""
+
+
+def installer_filename(version: str) -> str:
+    """Use the product version in every build, release, and install path."""
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ReleaseError("The installer requires a three-part product version.")
+    return f"{pathlib.Path(SETUP_SCRIPT).stem}-{version}.exe"
+
+
+def source_version(root: pathlib.Path, commit: str | None = None) -> str:
+    """Read Inno's sole AppVersion owner, optionally from an immutable commit."""
+    script = git_output(root, "show", f"{commit}:{SETUP_SCRIPT}") if commit else (root / SETUP_SCRIPT).read_text(encoding="utf-8-sig")
+    versions = re.findall(r'(?m)^#define AppVersion "([^"]+)"\r?$', script.removeprefix("\ufeff"))
+    if len(versions) != 1:
+        raise ReleaseError("The installer must declare exactly one AppVersion.")
+    installer_filename(versions[0])
+    return versions[0]
+
+
+def retain_checkout_installers(root: pathlib.Path, current: pathlib.Path | None = None) -> None:
+    """Prune only this producer's versioned outputs under the shared build lock."""
+    completed = []
+    for path in root.iterdir():
+        if path.name.startswith(".") and path.name.endswith(".tmp") and SETUP_FILENAME.fullmatch(path.name[1:-4]):
+            if path.is_symlink() or not path.is_file():
+                raise ReleaseError(f"Unsafe installer temporary file: {path.name}")
+            path.unlink()
+        elif SETUP_FILENAME.fullmatch(path.name):
+            if path.is_symlink() or not path.is_file():
+                raise ReleaseError(f"Unsafe installer output: {path.name}")
+            completed.append(path)
+    completed.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    keep = {current, *[path for path in completed if path != current][:2]} if current else set(completed[:3])
+    for path in completed:
+        if path not in keep:
+            path.unlink()
 
 
 def run_command(
@@ -227,24 +265,26 @@ def read_build(bundle: pathlib.Path, identity: str) -> dict[str, Any]:
         for name, digest in record["artifacts"].items():
             if pathlib.PureWindowsPath(name).name != name or file_digest(bundle / name) != digest:
                 raise ReleaseError("A completed installer artifact changed after its build.")
-        if SETUP_NAME not in record["artifacts"]:
+        if installer_filename(record["version"]) not in record["artifacts"]:
             raise ReleaseError("The completed build has no installer.")
         return record
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ReleaseError(f"The installer build is incomplete: {bundle.name}") from error
 
 
-def activate_installer(root: pathlib.Path, bundle: pathlib.Path) -> None:
-    output = root / SETUP_NAME
-    pending = root / f".{SETUP_NAME}.tmp"
+def activate_installer(root: pathlib.Path, bundle: pathlib.Path, record: Mapping[str, Any]) -> None:
+    name = installer_filename(record["version"])
+    output = root / name
+    pending = root / f".{name}.tmp"
     if output.is_symlink() or pending.is_symlink():
         raise ReleaseError("The installer output must not be a symbolic link.")
     pending.unlink(missing_ok=True)
     try:
-        shutil.copyfile(bundle / SETUP_NAME, pending)
+        shutil.copyfile(bundle / name, pending)
         pending.replace(output)
     finally:
         pending.unlink(missing_ok=True)
+    retain_checkout_installers(root, output)
 
 
 @contextlib.contextmanager
@@ -282,6 +322,8 @@ def build_installer(
     dependencies: Mapping[str, str], commit: str,
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     with source_snapshot(root, store, commit) as (staging, snapshot):
+        version = source_version(snapshot)
+        setup_name = installer_filename(version)
         inputs = packaging_inputs(snapshot, compiler)
         identity = build_identity(inputs, dependencies["InnoSetup"])
         bundle = store / identity
@@ -293,17 +335,19 @@ def build_installer(
             match = re.search(r"Compiler engine version:\s*Inno Setup ([\d.]+)", banner)
             if not match or match.group(1) != dependencies["InnoSetup"]:
                 raise ReleaseError("The compiler does not match the pinned Inno Setup version.")
+            if installer_version(staging / setup_name, root) != version:
+                raise ReleaseError("The compiled installer version differs from AppVersion.")
             source_name = f"AutoHotkey-v{dependencies['AutoHotkey']}-source.zip"
             source_archive(root, dependencies, staging / source_name)
             record = {
                 "schema": BUILD_SCHEMA, "identity": identity, "source_commit": commit,
-                "version": installer_version(staging / SETUP_NAME, root), "inputs": inputs,
-                "artifacts": {name: file_digest(staging / name) for name in (SETUP_NAME, source_name)},
+                "version": version, "inputs": inputs,
+                "artifacts": {name: file_digest(staging / name) for name in (setup_name, source_name)},
             }
             (staging / "receipt.json").write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
             remove_bundle(staging, snapshot)
             staging.rename(bundle)
-    activate_installer(root, bundle)
+    activate_installer(root, bundle, record)
     retain_builds(store, bundle)
     return bundle, record
 
@@ -406,6 +450,10 @@ def main() -> int:
         compiler = compiler_path(root, dependencies["InnoSetup"])
         store = build_store(root)
         with locked_store(store):
+            # An older checked-out release may have an accepted output with an
+            # older mtime. Protect that exact version even if later work fails.
+            current = root / installer_filename(source_version(root, commit))
+            retain_checkout_installers(root, current)
             if args.action == "build":
                 build_installer(root, store, compiler, dependencies, commit)
             else:
@@ -415,12 +463,12 @@ def main() -> int:
                 if not bundle.is_dir():
                     raise ReleaseError("Run the SDLC installer build action before publication or installation.")
                 record = read_build(bundle, identity)
-                activate_installer(root, bundle)
+                activate_installer(root, bundle, record)
                 retain_builds(store, bundle)
                 if args.action == "publish":
                     publish_installer(root, bundle, record, commit)
                 else:
-                    run_command([str(root / SETUP_NAME), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], root)
+                    run_command([str(root / installer_filename(record["version"])), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], root)
         print("OK")
         return 0
     except (ReleaseError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.CalledProcessError) as error:

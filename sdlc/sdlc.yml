@@ -57,7 +57,7 @@ deliverables:
       artifact:
         type: windows-installer
         output-directory: .
-        filename-pattern: CeratopsKeyboardLayout-Setup.exe
+        filename-pattern: CeratopsKeyboardLayout-Setup-*.exe
       actions:
         test:
           requires:
