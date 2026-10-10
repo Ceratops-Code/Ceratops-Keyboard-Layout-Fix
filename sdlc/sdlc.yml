@@ -7,6 +7,10 @@ repository:
     windows:
       executable: powershell
       platforms: [windows]
+    inno-setup:
+      executable: ISCC.exe
+      version: 6.7.3
+      platforms: [windows]
   actions:
     bootstrap:
       requires:
@@ -41,11 +45,25 @@ repository:
         - run: [uv, run, --project, scripts, --locked, python, -c, "import os, subprocess, sys; sys.exit(subprocess.call([os.path.abspath('CeratopsKeyboardLayout.exe'), '/ErrorStdOut=UTF-8', 'Tests/Test-AccessibleConversion.ahk']))"]
 
 deliverables:
+  packages:
+    ceratops-keyboard-layout-installer:
+      source: .
+      prerequisites: []
+      artifact:
+        type: windows-installer
+        output-directory: .
+        filename-pattern: CeratopsKeyboardLayout-Setup.exe
+      actions:
+        build:
+          requires:
+            capabilities: [windows, inno-setup]
+          steps:
+            - run: [ISCC.exe, /Q, CeratopsKeyboardLayout-Setup.iss]
   apps:
     ceratops-keyboard-layout:
       source: .
       manifest: CeratopsKeyboardLayout-Setup.iss
-      prerequisites: []
+      prerequisites: [ceratops-keyboard-layout-installer]
       actions:
         validate:
           requires:
@@ -57,5 +75,14 @@ deliverables:
           no-op: Repository tests run separately; the desktop hotkey check runs locally before release.
         install:
           requires:
-            capabilities: []
-          no-op: People install the GitHub Release executable; the repository does not auto-install it.
+            capabilities: [uv, windows]
+          steps:
+            - run:
+                - uv
+                - run
+                - --project
+                - scripts
+                - --locked
+                - python
+                - -c
+                - "import os, subprocess, sys; sys.exit(subprocess.call([os.path.abspath('CeratopsKeyboardLayout-Setup.exe'), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-']))"

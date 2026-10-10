@@ -98,10 +98,15 @@ shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
 The project folder owns CeratopsKeyboardLayout-Setup.iss and a local current
 standalone setup executable. The setup executable is excluded from Git and
-published as a GitHub Release asset. Inno Setup 6's ISCC.exe compiles the
-script to a temporary output directory; only a successful build replaces the
-local setup executable. Temporary compiler and output files are removed after
-the build.
+published as a GitHub Release asset. The SDLC package build action runs Inno
+Setup 6.7.3's ISCC.exe with CeratopsKeyboardLayout-Setup.iss and writes the
+current setup executable to the project folder. The compiler directory must
+be on PATH. A failed compiler exit stops the operation; no failed build is
+eligible for installation or publication. The compiler manages its temporary
+files; the project retains only its current local setup executable. Published
+GitHub Release assets retain their separate version identities.
+The app's SDLC install action runs the built setup executable silently and
+requires an administrator terminal. Building does not install or publish it.
 The running utility creates no files, output versions, checkpoints or logs.
 Maps and clipboard backups exist in memory and are released after use/exit.
 Setup's one-time SYSTEM test task and its XML/result files live in the
