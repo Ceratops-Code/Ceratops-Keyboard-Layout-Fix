@@ -39,13 +39,15 @@ editor limitations, and removal.
 | Ctrl+Alt+R | Convert selected text to Russian |
 | Ctrl+Alt+double E, H, or R | Select all and convert the whole text field |
 
-Right-click the green tray icon to see the combinations for installed supported
-keyboards, with the combinations aligned on the left. Choose **Change key
-combinations...** or double-click the tray icon to open **Key Combinations**.
+Right-click the green tray icon to see installed supported keyboard languages
+on the left and combinations in a separate aligned column on the right.
+Choose **Change key combinations...** or double-click the tray icon to open
+**Key Combinations**.
 Press a combination in each box and save. The checkbox before the Windows
-symbol and **WinKey +** adds the Windows key; an empty box disables a shortcut.
-The tray icon has no hover tooltip. Small icon sizes use a close-up face
-and simplified keyboard to fill more of the Windows tray slot.
+flag and **WinKey +** adds the Windows key; an empty box disables a shortcut.
+The tray icon has no hover tooltip. Small ICO frames use a broad, front-facing
+Trixie head and compact keyboard to fill the Windows tray slot. The large ICO
+frames and PNG keep the original artwork.
 Settings are shared by this installation, in
 `%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini`. They survive upgrades and
 are removed on uninstall. Other running sessions reload them when their tray

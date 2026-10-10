@@ -346,10 +346,10 @@ class KeyboardShortcutManager {
 
     RebuildTray() {
         A_TrayMenu.Delete()
-        ; Native menu accelerator columns right-align proportional text. Put
-        ; each combination first so different keys and lengths share one origin.
+        ; A native tab separates the language and accelerator columns, so
+        ; proportional characters and custom combinations cannot shift names.
         for row in this.InstalledRows()
-            A_TrayMenu.Add(StrReplace(row.Shortcut.Label, "+", " + ") "    — " row.Language,
+            A_TrayMenu.Add(row.Language "`t" StrReplace(row.Shortcut.Label, "+", " + "),
                 this.ShowSettings.Bind(this))
         if !this.Converter.Layouts.Count {
             A_TrayMenu.Add("No supported keyboards installed", (*) => 0)
@@ -412,24 +412,18 @@ class KeyboardShortcutManager {
             ; Keep a checkbox name for accessibility; its visible label follows
             ; the Windows symbol. All rows use the same vertical center and x's.
             winControl := dialog.AddCheckbox("x+10 yp w18 h26", "WinKey")
-            winIcon := dialog.AddText("x+2 yp w18 h26")
+            winIcon := dialog.AddText("x+2 yp w22 h26 +0x201", Chr(0xF0FF))
+            ; Wingdings ships with Windows and supplies its recognizable flag
+            ; glyph. Keep the symbol in its own control and font.
+            winIcon.SetFont("s16 cBlack", "Wingdings")
             winIcon.GetPos(&iconX, &iconY)
-            symbolParts := []
-            ; Four native rectangles keep the symbol sharp at every DPI and
-            ; cannot turn into a missing-font box. SS_BLACKRECT is 0x4.
-            Loop 4 {
-                square := dialog.AddText("x" (iconX + Mod(A_Index - 1, 2) * 9)
-                    " y" (iconY + 5 + Floor((A_Index - 1) / 2) * 9) " w7 h7 +0x4")
-                square.OnEvent("Click", this.ToggleWindowsModifier.Bind(this, winControl))
-                symbolParts.Push(square)
-            }
-            winLabel := dialog.AddText("x" (iconX + 22) " y" iconY " w68 h26 +0x200", "WinKey +")
+            winLabel := dialog.AddText("x" (iconX + 26) " y" iconY " w68 h26 +0x200", "WinKey +")
             winIcon.OnEvent("Click", this.ToggleWindowsModifier.Bind(this, winControl))
             winLabel.OnEvent("Click", this.ToggleWindowsModifier.Bind(this, winControl))
             hotkeyControl := dialog.AddHotkey("x+8 yp w235 h26", row.Shortcut.Control)
             winControl.Value := row.Shortcut.Win
             this.Controls[row.Name] := {Hotkey: hotkeyControl, Win: winControl,
-                WindowsIcon: winIcon, WindowsLabel: winLabel, WindowsParts: symbolParts}
+                WindowsIcon: winIcon, WindowsLabel: winLabel}
         }
         dialog.AddText("xm y+18 w600", "One press converts the selection after a 350 ms double-tap window.`nHold the modifiers and tap the same key twice to select all`nand convert. Neither action waits for you to release the keys.")
         this.Status := dialog.AddText("xm y+12 w600 cRed", "")
