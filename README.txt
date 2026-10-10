@@ -16,8 +16,10 @@ supported keyboards, the single/double-tap explanation, and Change key combinati
 Double-clicking the tray icon opens the same Key Combinations window.
 Press a combination in each box, optionally check WinKey + to add the Windows key,
 then Save. Include Ctrl, Alt or Win; leaving a box empty disables that shortcut.
-Combinations share the left edge in the tray menu. The icon has no hover tooltip.
-Small icon sizes use a close-up face and simplified keyboard to fill more of the tray slot.
+Languages occupy the left tray-menu column; combinations align in the right column.
+The WinKey checkbox uses Windows' recognizable flag symbol. The tray icon has no hover tooltip.
+Small ICO frames use a broad, front-facing Trixie head and compact keyboard.
+The large ICO frames and PNG keep the original artwork.
 Restore defaults resets the displayed rows. Each combination belongs to one
 language. A combination reserved by an absent language's saved shortcut still
 needs a different assignment. Cancel leaves the current shortcuts unchanged.

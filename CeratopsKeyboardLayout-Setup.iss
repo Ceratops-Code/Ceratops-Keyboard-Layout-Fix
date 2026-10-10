@@ -1,7 +1,7 @@
 ; Rebuild with Inno Setup 6's ISCC.exe from this directory. The protected
 ; Program Files copy owns the SYSTEM service and its desktop companion.
 #define AppName "Ceratops Keyboard Layout"
-#define AppVersion "1.0.14"
+#define AppVersion "1.0.15"
 #define AppPublisher "Ceratops-Code"
 #define AppURL "https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix"
 #define AppDescription "Convert keyboard layouts between English, Hebrew, and Russian."

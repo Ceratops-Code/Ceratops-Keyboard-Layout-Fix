@@ -147,8 +147,8 @@ CheckKeyCombinationInterface(shortcuts) {
         DllCall("GetMenuStringW", "Ptr", A_TrayMenu.Handle, "UInt", index - 1,
             "Ptr", text, "Int", 512, "UInt", 0x400)
         label := StrGet(text)
-        if InStr(label, "`t") || InStr(label, StrReplace(row.Shortcut.Label, "+", " + ")) != 1
-            throw Error("Tray combinations do not share the left edge")
+        if label != row.Language "`t" StrReplace(row.Shortcut.Label, "+", " + ")
+            throw Error("Tray languages and combinations are not in separate native columns")
     }
     ; Deliver the shell's double-click message to our own script window. This
     ; exercises AHK's default-item dispatch without moving the user's mouse.
@@ -173,22 +173,33 @@ CheckKeyCombinationInterface(shortcuts) {
             throw Error("The row is not checkbox, Windows symbol, WinKey +, then combination")
         if checkY != iconY || iconY != labelY || labelY != keyY || (previousX >= 0 && keyX != previousX)
             throw Error("Key combination controls are not aligned across rows")
-        if control.WindowsParts.Length != 4 || control.WindowsLabel.Text != "WinKey +"
+        if control.WindowsIcon.Text != Chr(0xF0FF) || control.WindowsLabel.Text != "WinKey +"
             throw Error("The Windows modifier label is missing")
-        for square in control.WindowsParts {
-            square.GetPos(&squareX, &squareY, &squareWidth, &squareHeight)
-            if (ControlGetStyle(square.Hwnd) & 0x1F) != 0x4 || squareWidth != 7 || squareHeight != 7
-                throw Error("The Windows symbol does not consist of four filled squares")
-            if squareX < iconX || squareX + squareWidth > iconX + iconWidth || squareY < iconY || squareY + squareHeight > keyY + 26
-                throw Error("A Windows symbol square is outside its row")
+        ; Inspect the selected native font and actual glyph coverage, so a
+        ; missing-font box cannot satisfy the Windows-logo check.
+        dc := DllCall("GetDC", "Ptr", control.WindowsIcon.Hwnd, "Ptr")
+        font := SendMessage(0x31, 0, 0, control.WindowsIcon.Hwnd)
+        prior := DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", font, "Ptr")
+        try {
+            face := Buffer(128, 0), glyph := Buffer(2, 0)
+            DllCall("Gdi32\GetTextFaceW", "Ptr", dc, "Int", 64, "Ptr", face)
+            DllCall("Gdi32\GetGlyphIndicesW", "Ptr", dc, "Str", Chr(0xF0FF),
+                "Int", 1, "Ptr", glyph, "UInt", 1)
+            if StrGet(face) != "Wingdings" || NumGet(glyph, 0, "UShort") = 0xFFFF
+                throw Error("Windows did not supply the Windows-key logo glyph")
+        } finally {
+            DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", prior)
+            DllCall("ReleaseDC", "Ptr", control.WindowsIcon.Hwnd, "Ptr", dc)
         }
         previousX := keyX
         before := control.Win.Value
-        ControlClick(control.WindowsLabel.Hwnd, , , , , "NA")
-        Sleep(10)
-        if control.Win.Value != !before
-            throw Error("Clicking WinKey + did not toggle its own checkbox")
-        control.Win.Value := before
+        for clickable in [control.WindowsIcon, control.WindowsLabel] {
+            ControlClick(clickable.Hwnd, , , , , "NA")
+            Sleep(10)
+            if control.Win.Value != !before
+                throw Error("Clicking the Windows-key logo or label did not toggle its own checkbox")
+            control.Win.Value := before
+        }
     }
     DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", 0x203)
     Sleep(30)
