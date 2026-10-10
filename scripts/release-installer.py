@@ -49,9 +49,10 @@ def installer_filename(version: str) -> str:
     return f"{pathlib.Path(SETUP_SCRIPT).stem}-{version}.exe"
 
 
-def source_version(root: pathlib.Path) -> str:
-    """Inno's AppVersion definition is the only application-version owner."""
-    versions = re.findall(r'(?m)^#define AppVersion "([^"]+)"$', (root / SETUP_SCRIPT).read_text(encoding="utf-8-sig"))
+def source_version(root: pathlib.Path, commit: str | None = None) -> str:
+    """Read Inno's sole AppVersion owner, optionally from an immutable commit."""
+    script = git_output(root, "show", f"{commit}:{SETUP_SCRIPT}") if commit else (root / SETUP_SCRIPT).read_text(encoding="utf-8-sig")
+    versions = re.findall(r'(?m)^#define AppVersion "([^"]+)"\r?$', script.removeprefix("\ufeff"))
     if len(versions) != 1:
         raise ReleaseError("The installer must declare exactly one AppVersion.")
     installer_filename(versions[0])
@@ -449,7 +450,10 @@ def main() -> int:
         compiler = compiler_path(root, dependencies["InnoSetup"])
         store = build_store(root)
         with locked_store(store):
-            retain_checkout_installers(root)
+            # An older checked-out release may have an accepted output with an
+            # older mtime. Protect that exact version even if later work fails.
+            current = root / installer_filename(source_version(root, commit))
+            retain_checkout_installers(root, current)
             if args.action == "build":
                 build_installer(root, store, compiler, dependencies, commit)
             else:

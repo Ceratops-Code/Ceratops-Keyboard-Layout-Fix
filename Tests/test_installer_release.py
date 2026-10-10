@@ -57,7 +57,8 @@ class BuildTests(unittest.TestCase):
 
     def compile(self, argv: list[str], root: pathlib.Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         if argv[:2] == ["git", "show"]:
-            return subprocess.CompletedProcess(argv, 0, json.dumps(self.dependencies).encode(), b"")
+            data = (self.root / release.SETUP_SCRIPT).read_bytes() if argv[2].endswith(":" + release.SETUP_SCRIPT) else json.dumps(self.dependencies).encode()
+            return subprocess.CompletedProcess(argv, 0, data, b"")
         if argv[:2] == ["git", "archive"]:
             stream = io.BytesIO()
             with tarfile.open(fileobj=stream, mode="w") as archive:
@@ -188,6 +189,31 @@ class BuildTests(unittest.TestCase):
         release.retain_checkout_installers(self.root)
         self.assertFalse(orphan.exists())
         self.assertTrue(unrelated.exists())
+
+    def test_startup_preserves_older_current_installer_when_build_fails(self) -> None:
+        current = self.root / self.setup_name
+        current.write_bytes(b"accepted current release")
+        os.utime(current, (1, 1))
+        for number in range(13, 16):
+            newer = self.root / f"CeratopsKeyboardLayout-Setup-1.0.{number}.exe"
+            newer.write_bytes(b"another release")
+            os.utime(newer, (number, number))
+
+        def fail_compilation(argv: list[str], root: pathlib.Path) -> subprocess.CompletedProcess[bytes]:
+            if argv[0] == str(self.compiler):
+                raise release.ReleaseError("compiler failed")
+            return self.compile(argv, root)
+
+        self.command.side_effect = fail_compilation
+        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
+             mock.patch.object(release, "build_store", return_value=self.store), \
+             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
+             mock.patch.object(sys, "argv", ["release-installer.py", "build", "--repo-root", str(self.root)]), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(release.main(), 1)
+        self.assertEqual(current.read_bytes(), b"accepted current release")
+        self.assertEqual(len(list(self.root.glob("CeratopsKeyboardLayout-Setup-*.exe"))), 3)
+        self.assertEqual([path.name for path in self.store.iterdir()], [".lock"])
 
     def test_mismatched_compiled_version_preserves_accepted_output(self) -> None:
         output = self.root / self.setup_name
