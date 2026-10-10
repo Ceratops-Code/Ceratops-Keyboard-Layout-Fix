@@ -2,7 +2,7 @@
 # cache ownership and transaction behavior, with HTTP/setup boundaries substituted.
 # No Windows installation, service, GitHub release or user clipboard is changed.
 [CmdletBinding()]
-param([string]$TempRoot)
+param([string]$TempRoot, [string]$CasePattern = '.*')
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'Update-AppInstall.ps1')
@@ -23,14 +23,18 @@ function Assert-Equal {
 }
 
 function Assert-Fails {
-    param([scriptblock]$Operation)
+    param([scriptblock]$Operation, [string]$ExpectedMessage)
     $failed = $false
-    try { & $Operation | Out-Null } catch { $failed = $true }
+    try { & $Operation | Out-Null } catch {
+        if ($ExpectedMessage -and -not $_.Exception.Message.Contains($ExpectedMessage)) { throw }
+        $failed = $true
+    }
     if (-not $failed) { throw 'The unsafe operation was accepted.' }
 }
 
 function Test-Case {
     param([string]$Name, [scriptblock]$Operation)
+    if ($Name -notmatch $CasePattern) { return }
     try { & $Operation; $script:Passed++ }
     catch { throw "${Name}: $($_.Exception.Message)" }
 }
@@ -207,7 +211,7 @@ try {
     }
     Test-Case 'startup without installation, offline, current, older and declined' {
         foreach ($mode in @('Unregistered', 'Offline', 'Current', 'Older', 'Declined')) {
-            $state = [pscustomobject]@{ Mode = $mode; Requests = 0; Prompts = 0; Installs = 0 }
+            $state = [pscustomobject]@{ Mode = $mode; Requests = 0; Prompts = 0; Installs = 0; Notices = 0 }
             $ops = @{
                 ReadVersion = { param($directory)
                     if ($state.Mode -ne 'Unregistered') { return ConvertTo-AppVersion '1.0.10' }
@@ -219,10 +223,12 @@ try {
                     return [pscustomobject]@{ Version = (ConvertTo-AppVersion $v) }
                 }
             }
-            Invoke-StartupUpdateCheck 'fixture-install' $ops `
-                { param($message) $state.Prompts++; return $false } { param($v) $state.Installs++ }
+            Invoke-AppUpdateCheck 'fixture-install' $ops `
+                { param($message) $state.Prompts++; return $false } { param($v) $state.Installs++ } `
+                -Notify { param($message) $state.Notices++ }
             Assert-Equal $state.Installs 0 'No unwanted installations'
             Assert-Equal $state.Prompts ([int]($mode -eq 'Declined')) 'Only newer stable versions prompt'
+            Assert-Equal $state.Notices 0 'Routine startup outcomes stay quiet'
             if ($mode -eq 'Unregistered') { Assert-Equal $state.Requests 0 'Portable copy does not access GitHub' }
         }
     }
@@ -232,9 +238,121 @@ try {
             ReadVersion = { param($directory) ConvertTo-AppVersion '1.0.10' }
             GetRelease = { param($version) [pscustomobject]@{ Version = (ConvertTo-AppVersion '1.0.11') } }
         }
-        Invoke-StartupUpdateCheck 'fixture-install' $ops { param($message) return $true } `
+        Invoke-AppUpdateCheck 'fixture-install' $ops { param($message) return $true } `
             { param($version) $state.Version = $version }
         Assert-Equal $state.Version (ConvertTo-AppVersion '1.0.11') 'Approved version'
+    }
+    Test-Case 'manual check reports outcomes and keeps consent and upgrade handoff' {
+        foreach ($mode in @('Unregistered', 'Offline', 'Current', 'Older', 'Declined', 'Accepted', 'WorkerFailure')) {
+            $state = [pscustomobject]@{ Mode = $mode; Requests = 0; Prompts = 0; Installs = 0
+                Notice = ''; Version = $null; Success = $false }
+            $ops = @{
+                ReadVersion = { param($directory)
+                    if ($state.Mode -ne 'Unregistered') { return ConvertTo-AppVersion '1.0.10' }
+                }
+                GetRelease = { param($version)
+                    $state.Requests++
+                    if ($state.Mode -eq 'Offline') { throw 'Offline fixture' }
+                    $v = switch ($state.Mode) { Current { '1.0.10' }; Older { '1.0.9' }; default { '1.0.11' } }
+                    return [pscustomobject]@{ Version = (ConvertTo-AppVersion $v) }
+                }
+            }
+            Invoke-AppUpdateCheck 'fixture-install' $ops `
+                { param($message) $state.Prompts++; return $state.Mode -ne 'Declined' } `
+                { param($version)
+                    $state.Installs++; $state.Version = $version
+                    if ($state.Mode -eq 'WorkerFailure') { throw 'Worker could not start' }
+                } -Manual -Notify {
+                    param($message, [bool]$success = $false)
+                    $state.Notice = $message; $state.Success = $success
+                }
+            Assert-Equal $state.Prompts ([int]($mode -in @('Declined', 'Accepted', 'WorkerFailure'))) 'Only newer versions prompt'
+            Assert-Equal $state.Installs ([int]($mode -in @('Accepted', 'WorkerFailure'))) 'No upgrade without consent'
+            Assert-Equal $state.Success ($mode -in @('Current', 'Older')) 'Only a successful current-version check is green'
+            if ($mode -eq 'Unregistered') {
+                Assert-Equal $state.Requests 0 'Portable manual check does not access GitHub'
+                Assert-Equal ($state.Notice.Contains('installed Ceratops')) $true 'Unregistered result shown'
+            } elseif ($mode -eq 'Offline') {
+                Assert-Equal ($state.Notice.StartsWith('Could not check for updates.')) $true 'Network failure shown'
+            } elseif ($mode -in @('Current', 'Older')) {
+                Assert-Equal $state.Notice 'Ceratops Keyboard Layout 1.0.10 is up to date.' 'Current version shown'
+            } elseif ($mode -eq 'WorkerFailure') {
+                Assert-Equal $state.Notice 'Upgrade failed. The current version was not changed.' 'Launch failure shown'
+            } else {
+                Assert-Equal $state.Notice '' 'No misleading extra outcome'
+            }
+            if ($state.Installs) {
+                Assert-Equal $state.Version (ConvertTo-AppVersion '1.0.11') 'Exact approved release handed off'
+            }
+        }
+    }
+    Test-Case 'success notice interruption closes its dialog and fresh notices work' {
+        & {
+            $state = [pscustomobject]@{ Boundary = ''; Visible = $false; Shown = 0; Disposed = 0 }
+            function New-UpdateSuccessDialog {
+                param([string]$Text)
+                $dialog = [pscustomobject]@{ State = $state }
+                Add-Member -InputObject $dialog -MemberType ScriptMethod -Name ShowDialog -Value {
+                    if ($this.State.Boundary -eq 'show-before') { throw 'notice-test-interruption' }
+                    $this.State.Visible = $true; $this.State.Shown++
+                    if ($this.State.Boundary -in @('show-after', 'close-before')) { throw 'notice-test-interruption' }
+                    $this.State.Visible = $false
+                    if ($this.State.Boundary -eq 'close-after') { throw 'notice-test-interruption' }
+                    return 'OK'
+                }
+                Add-Member -InputObject $dialog -MemberType ScriptMethod -Name Dispose -Value {
+                    $this.State.Visible = $false; $this.State.Disposed++
+                }
+                return $dialog
+            }
+            # Stop immediately on either side of opening and closing. The real
+            # message owner must dispose a failed dialog; a fresh request builds
+            # another one through the ordinary entrypoint, with no saved step.
+            foreach ($boundary in @('show-before', 'show-after', 'close-before', 'close-after')) {
+                $state.Boundary = $boundary
+                $disposed = $state.Disposed
+                Assert-Fails { Show-UpdateMessage 'Current version' -Success } 'notice-test-interruption'
+                Assert-Equal $state.Visible $false 'Interrupted notice cannot leave a window open'
+                Assert-Equal $state.Disposed ($disposed + 1) 'Interrupted dialog disposed'
+                $state.Boundary = ''
+                for ($repeat = 0; $repeat -lt 2; $repeat++) {
+                    $shown = $state.Shown
+                    Assert-Equal (Show-UpdateMessage 'Current version' -Success) $false 'Success notice is not upgrade consent'
+                    Assert-Equal $state.Shown ($shown + 1) 'Fresh notice shown once'
+                    Assert-Equal $state.Visible $false 'Fresh notice closes cleanly'
+                }
+            }
+        }
+    }
+    Test-Case 'manual notice interruption keeps the installation and fresh check outcome' {
+        $state = [pscustomobject]@{ Boundary = ''; Installs = 0; Prompts = 0
+            Version = (ConvertTo-AppVersion '1.0.14'); Notices = [Collections.Generic.List[object]]::new() }
+        $ops = @{
+            ReadVersion = { param($directory) return $state.Version }
+            GetRelease = { param($version) return [pscustomobject]@{ Version = $state.Version } }
+        }
+        $notice = {
+            param($message, [bool]$success = $false)
+            if ($success -and $state.Boundary -eq 'before') { throw 'notice-test-interruption' }
+            $state.Notices.Add([pscustomobject]@{ Text = $message; Success = $success })
+            if ($success -and $state.Boundary -eq 'after') { throw 'notice-test-interruption' }
+        }
+        foreach ($boundary in @('before', 'after')) {
+            $state.Boundary = $boundary
+            Invoke-AppUpdateCheck 'fixture-install' $ops { $state.Prompts++; return $true } `
+                { $state.Installs++ } -Manual -Notify $notice
+            $state.Boundary = ''
+            for ($repeat = 0; $repeat -lt 2; $repeat++) {
+                Invoke-AppUpdateCheck 'fixture-install' $ops { $state.Prompts++; return $true } `
+                    { $state.Installs++ } -Manual -Notify $notice
+                Assert-Equal $state.Notices[$state.Notices.Count - 1].Success $true 'Fresh current-version check succeeds'
+                Assert-Equal $state.Notices[$state.Notices.Count - 1].Text `
+                    'Ceratops Keyboard Layout 1.0.14 is up to date.' 'Fresh notice uses current inputs'
+            }
+            Assert-Equal $state.Version (ConvertTo-AppVersion '1.0.14') 'Notice interruption keeps the installed version'
+            Assert-Equal $state.Installs 0 'No installation as notification recovery'
+            Assert-Equal $state.Prompts 0 'No upgrade consent for a current version'
+        }
     }
     Test-Case 'preparation failure preserves old installation' {
         foreach ($mode in @('MissingRollback', 'DownloadFailure', 'BadNewPackage')) {
@@ -340,6 +458,23 @@ try {
         Assert-Equal (@(Get-ChildItem -LiteralPath $cache -Directory -Filter 'attempt-*').Count) 0 'Recovery removed after success'
     }
     if ($env:OS -eq 'Windows_NT') {
+        Test-Case 'successful check dialog has a green check and keyboard dismissal' {
+            $text = 'Ceratops Keyboard Layout 1.0.13 is up to date.'
+            $dialog = New-UpdateSuccessDialog $text
+            try {
+                $dialog.Show()
+                [Windows.Forms.Application]::DoEvents()
+                $mark = $dialog.Controls.Find('SuccessMark', $true)[0]
+                $message = $dialog.Controls.Find('UpdateMessage', $true)[0]
+                Assert-Equal $mark.Text ([string][char]0x2713) 'Success check glyph'
+                Assert-Equal $mark.ForeColor.ToArgb() ([Drawing.Color]::ForestGreen.ToArgb()) 'Green success color'
+                Assert-Equal $message.Text $text 'Version message retained'
+                Assert-Equal ($mark.Right -le $message.Left) $true 'Check does not overlap message'
+                Assert-Equal ($message.Right -le $dialog.ClientSize.Width) $true 'Message fits the dialog'
+                Assert-Equal $dialog.AcceptButton.Text 'OK' 'Enter dismisses the notice'
+                Assert-Equal ($dialog.CancelButton -eq $dialog.AcceptButton) $true 'Escape dismisses the notice'
+            } finally { $dialog.Dispose() }
+        }
         Test-Case 'cache links are refused without touching their targets' {
             $cache = Join-Path $testRoot 'linked-cache'
             $target = Join-Path $testRoot 'link-target'

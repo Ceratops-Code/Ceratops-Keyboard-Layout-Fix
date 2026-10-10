@@ -17,10 +17,13 @@ Adding or removing a supported keyboard takes effect on the next conversion
 shortcut, without restarting Ceratops. It reads Windows' available-layout list
 once per request and reuses its conversion tables unless that list changes.
 At startup, installed copies check GitHub for a newer stable release and ask
-before upgrading. Ceratops stays usable during the check and downloads. The
+before upgrading. **Check for updates** in the tray menu runs the same check
+on demand and reports when the app is up to date, with a green check, or the
+check fails.
+Ceratops stays usable during the check and downloads. The
 updater prepares both installers first and restores the previous version if
 the new installation fails. Both installers retain the registered installation
-folder. Offline checks are quiet; portable copies do not
+folder. Offline startup checks are quiet; portable copies do not
 upgrade the installed app.
 Installer filenames include their version, such as
 `CeratopsKeyboardLayout-Setup-1.0.12.exe`. Install version 1.0.12 manually when
@@ -29,12 +32,30 @@ Later automatic updates use the versioned filename for both upgrade and recovery
 See [the user guide](README.txt) for installation, shortcut behavior,
 editor limitations, and removal.
 
-| Shortcut | Action |
+| Default shortcut | Action |
 | --- | --- |
 | Ctrl+Alt+E | Convert selected text to English |
 | Ctrl+Alt+H | Convert selected text to Hebrew |
 | Ctrl+Alt+R | Convert selected text to Russian |
 | Ctrl+Alt+double E, H, or R | Select all and convert the whole text field |
+
+Right-click the green tray icon to see the combinations for installed supported
+keyboards, with the combinations aligned on the left. Choose **Change key
+combinations...** or double-click the tray icon to open **Key Combinations**.
+Press a combination in each box and save. The checkbox before the Windows
+symbol and **WinKey +** adds the Windows key; an empty box disables a shortcut.
+The tray icon has no hover tooltip. Small icon sizes use a close-up face
+and simplified keyboard to fill more of the Windows tray slot.
+Settings are shared by this installation, in
+`%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini`. They survive upgrades and
+are removed on uninstall. Other running sessions reload them when their tray
+menu opens; no background polling is used.
+
+A single tap converts the selection after a 350 ms double-tap decision window
+measured from key-down. A second tap within that window selects all and converts
+the field immediately. Hold the modifiers between taps. Neither action waits
+for key release, and a held key's automatic repeats are ignored. Only one
+conversion runs for a double tap, so punctuation is not converted twice.
 
 The source code, installer script, and repository-owned tests are licensed
 under [MIT](LICENSE). The bundled AutoHotkey runtime retains its
