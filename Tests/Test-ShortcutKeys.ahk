@@ -51,6 +51,176 @@ SendTestKeys(keys, targetWindow := 0) {
     try SendEvent(keys)
     finally SendLevel(priorLevel)
 }
+
+class InterruptedSettingsWindow {
+    __New(window, owner) {
+        this.Window := window, this.Owner := owner
+    }
+    Hwnd => this.Window.Hwnd
+    __Call(name, parameters) => this.Window.%name%(parameters*)
+    Show(options := "") {
+        if this.Owner.FaultBoundary = "before"
+            throw Error("interface-test-interruption")
+        this.Window.Show(options)
+        if this.Owner.FaultBoundary = "after"
+            throw Error("interface-test-interruption")
+    }
+}
+class InterruptedShortcutInterface extends KeyboardShortcutManager {
+    FaultBoundary := ""
+    CreateSettingsDialog() => InterruptedSettingsWindow(super.CreateSettingsDialog(), this)
+}
+InterruptInterfaceEffect(operation, effect, selectedEffect, boundary, parameters*) {
+    if effect = selectedEffect && boundary = "before"
+        throw Error("interface-test-interruption")
+    result := operation(parameters*)
+    if effect = selectedEffect && boundary = "after"
+        throw Error("interface-test-interruption")
+    return result
+}
+ExpectInterfaceInterruption(operation) {
+    try operation()
+    catch Error as failure {
+        if failure.Message = "interface-test-interruption"
+            return
+        throw failure
+    }
+    throw Error("The interface interruption boundary was not exercised")
+}
+CheckInterfaceInterruptions(shortcuts) {
+    ; The only visible settings effect is Show: controls are built in a hidden
+    ; window first. Faults surround real Show calls, and fresh calls use the
+    ; ordinary entrypoint, the current window and current settings, no recovery
+    ; checkpoint. Menu preparation and each native tray effect are repeated too.
+    static boundaries := ["before", "after"]
+    iconFile := A_ScriptDir "\..\CeratopsKeyboardLayout.ico"
+    for boundary in boundaries {
+        for selectedEffect in ["icon", "tooltip"] {
+            setIcon := InterruptInterfaceEffect.Bind(TraySetIcon, "icon", selectedEffect, boundary)
+            clearTooltip := InterruptInterfaceEffect.Bind(HideAppTrayTooltip, "tooltip", selectedEffect, boundary)
+            ExpectInterfaceInterruption(InitializeAppTray.Bind(iconFile, setIcon, clearTooltip))
+            InitializeAppTray(iconFile)
+            if !HideAppTrayTooltip()
+                throw Error("A fresh tray setup did not remove its tooltip")
+        }
+        ExpectInterfaceInterruption(InterruptInterfaceEffect.Bind(shortcuts.RebuildTray.Bind(shortcuts),
+            "menu", "menu", boundary))
+        shortcuts.RebuildTray()
+        if A_TrayMenu.Default != "Change key combinations..."
+            throw Error("A fresh menu build did not restore the double-click action")
+        fixture := InterruptedShortcutInterface(shortcuts.Converter, shortcuts.Settings)
+        try {
+            fixture.FaultBoundary := boundary
+            ExpectInterfaceInterruption(fixture.ShowSettings.Bind(fixture))
+            hwnd := fixture.Dialog.Hwnd
+            fixture.FaultBoundary := ""
+            fixture.ShowSettings()
+            if fixture.Dialog.Hwnd != hwnd || !DllCall("IsWindowVisible", "Ptr", hwnd)
+                throw Error("A fresh settings request did not reuse and show its current window")
+            fixture.ShowSettings()
+            if fixture.Dialog.Hwnd != hwnd
+                throw Error("Repeated settings requests created duplicate windows")
+            for name, control in fixture.Controls {
+                before := control.Win.Value
+                ExpectInterfaceInterruption(InterruptInterfaceEffect.Bind(
+                    fixture.ToggleWindowsModifier.Bind(fixture, control.Win), "toggle", "toggle", boundary))
+                if control.Win.Value != (boundary = "after" ? !before : before)
+                    throw Error("The interrupted Windows modifier changed the wrong state")
+                current := control.Win.Value
+                fixture.ToggleWindowsModifier(control.Win)
+                if control.Win.Value != !current
+                    throw Error("A fresh Windows modifier click did not toggle its current state")
+            }
+        } finally fixture.CloseDialog()
+    }
+}
+
+CheckKeyCombinationInterface(shortcuts) {
+    InitializeAppTray(A_ScriptDir "\..\CeratopsKeyboardLayout.ico")
+    if !HideAppTrayTooltip()
+        throw Error("Windows did not accept removal of this test app's tray tooltip")
+    shortcuts.RebuildTray()
+    if A_TrayMenu.Default != "Change key combinations..." || A_TrayMenu.ClickCount != 2
+        throw Error("The tray default does not open key combinations on a double-click")
+    for index, row in shortcuts.InstalledRows() {
+        text := Buffer(1024, 0)
+        DllCall("GetMenuStringW", "Ptr", A_TrayMenu.Handle, "UInt", index - 1,
+            "Ptr", text, "Int", 512, "UInt", 0x400)
+        label := StrGet(text)
+        if InStr(label, "`t") || InStr(label, StrReplace(row.Shortcut.Label, "+", " + ")) != 1
+            throw Error("Tray combinations do not share the left edge")
+    }
+    ; Deliver the shell's double-click message to our own script window. This
+    ; exercises AHK's default-item dispatch without moving the user's mouse.
+    DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", 0x203)
+    deadline := A_TickCount + 1000
+    while !shortcuts.Dialog && A_TickCount < deadline
+        Sleep(10)
+    if !shortcuts.Dialog
+        throw Error("A tray double-click did not open the key combinations window")
+    hwnd := shortcuts.Dialog.Hwnd
+    if WinGetTitle("ahk_id " hwnd) != "Ceratops Keyboard Layout - Key Combinations"
+        throw Error("The settings window has the wrong title")
+    if shortcuts.Controls.Count != shortcuts.Converter.Layouts.Count
+        throw Error("The key combinations window shows an uninstalled keyboard")
+    previousX := -1
+    for name, control in shortcuts.Controls {
+        control.Win.GetPos(&checkX, &checkY, &checkWidth)
+        control.WindowsIcon.GetPos(&iconX, &iconY, &iconWidth)
+        control.WindowsLabel.GetPos(&labelX, &labelY, &labelWidth)
+        control.Hotkey.GetPos(&keyX, &keyY)
+        if checkX + checkWidth > iconX || iconX + iconWidth > labelX || labelX + labelWidth > keyX
+            throw Error("The row is not checkbox, Windows symbol, WinKey +, then combination")
+        if checkY != iconY || iconY != labelY || labelY != keyY || (previousX >= 0 && keyX != previousX)
+            throw Error("Key combination controls are not aligned across rows")
+        if control.WindowsParts.Length != 4 || control.WindowsLabel.Text != "WinKey +"
+            throw Error("The Windows modifier label is missing")
+        for square in control.WindowsParts {
+            square.GetPos(&squareX, &squareY, &squareWidth, &squareHeight)
+            if (ControlGetStyle(square.Hwnd) & 0x1F) != 0x4 || squareWidth != 7 || squareHeight != 7
+                throw Error("The Windows symbol does not consist of four filled squares")
+            if squareX < iconX || squareX + squareWidth > iconX + iconWidth || squareY < iconY || squareY + squareHeight > keyY + 26
+                throw Error("A Windows symbol square is outside its row")
+        }
+        previousX := keyX
+        before := control.Win.Value
+        ControlClick(control.WindowsLabel.Hwnd, , , , , "NA")
+        Sleep(10)
+        if control.Win.Value != !before
+            throw Error("Clicking WinKey + did not toggle its own checkbox")
+        control.Win.Value := before
+    }
+    DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", 0x203)
+    Sleep(30)
+    if shortcuts.Dialog.Hwnd != hwnd
+        throw Error("A second tray double-click created a duplicate window")
+    shortcuts.CloseDialog()
+}
+
+; UI-only checks do not register global keys, send keyboard input, change the
+; shared settings, or stop an installed service. The full desktop suite also
+; uses these same checks before testing real key capture and conversion.
+if A_Args.Length >= 2 && A_Args[2] = "--ui-only" {
+    uiDirectory := A_Args[1] "\shortcut-interface-" DllCall("GetCurrentProcessId")
+    try {
+        uiManager := KeyboardShortcutManager(Converter, KeyboardShortcutSettings(uiDirectory "\Shortcuts.ini"))
+        CheckKeyCombinationInterface(uiManager)
+        CheckInterfaceInterruptions(uiManager)
+        try FileAppend("PASS key combinations dialog, row alignment, tray double-click, tooltip removal and interrupted/fresh UI requests`n", "*")
+        uiCode := 0
+    } catch Error as failure {
+        try FileAppend("FAIL: " failure.Message " (line " failure.Line "; " failure.Extra ")`n", "*")
+        uiCode := 1
+    } finally {
+        if IsSet(uiManager)
+            uiManager.CloseDialog()
+        if DirExist(uiDirectory)
+            DirDelete(uiDirectory, true)
+        try WinActivate("ahk_id " originalWindow)
+    }
+    ExitApp(uiCode)
+}
+
 try {
     if !WinExist("A")
         throw Error("The interactive desktop is unavailable. Unlock Windows before running this check.")
@@ -67,6 +237,8 @@ try {
     settings := KeyboardShortcutSettings(settingsDirectory "\Shortcuts.ini")
     shortcuts := KeyboardShortcutManager(Converter, settings)
     shortcuts.Start()
+    CheckKeyCombinationInterface(shortcuts)
+    CheckInterfaceInterruptions(shortcuts)
     if DllCall("GetMenuItemCount", "Ptr", A_TrayMenu.Handle) != Converter.Layouts.Count + 7
         throw Error("Tray menu does not show the installed languages and shortcut help")
     shortcuts.ShowSettings()

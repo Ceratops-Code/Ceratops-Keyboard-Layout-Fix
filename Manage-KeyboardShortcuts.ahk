@@ -338,8 +338,11 @@ class KeyboardShortcutManager {
 
     RebuildTray() {
         A_TrayMenu.Delete()
+        ; Native menu accelerator columns right-align proportional text. Put
+        ; each combination first so different keys and lengths share one origin.
         for row in this.InstalledRows()
-            A_TrayMenu.Add(row.Language "`t" row.Shortcut.Label, this.ShowSettings.Bind(this))
+            A_TrayMenu.Add(StrReplace(row.Shortcut.Label, "+", " + ") "    — " row.Language,
+                this.ShowSettings.Bind(this))
         if !this.Converter.Layouts.Count {
             A_TrayMenu.Add("No supported keyboards installed", (*) => 0)
             A_TrayMenu.Disable("No supported keyboards installed")
@@ -349,9 +352,12 @@ class KeyboardShortcutManager {
         A_TrayMenu.Disable("Single tap: convert selected text")
         A_TrayMenu.Add("Double tap: select all and convert", (*) => 0)
         A_TrayMenu.Disable("Double tap: select all and convert")
-        A_TrayMenu.Add("Change shortcuts...", this.ShowSettings.Bind(this))
+        settingsItem := "Change key combinations..."
+        A_TrayMenu.Add(settingsItem, this.ShowSettings.Bind(this))
         if !this.Converter.Layouts.Count
-            A_TrayMenu.Disable("Change shortcuts...")
+            A_TrayMenu.Disable(settingsItem)
+        A_TrayMenu.Default := settingsItem
+        A_TrayMenu.ClickCount := 2
         A_TrayMenu.Add("Check for updates", (*) => StartAppUpdateCheck(true))
         A_TrayMenu.Add()
         A_TrayMenu.Add("Exit Ceratops Keyboard Layout", (*) => ExitApp())
@@ -389,19 +395,36 @@ class KeyboardShortcutManager {
             MsgBox(failure.Message, "Ceratops Keyboard Layout", "Icon!")
             return
         }
-        dialog := Gui(, "Ceratops Keyboard Layout - Shortcuts")
+        dialog := this.CreateSettingsDialog()
         this.Dialog := dialog, this.Controls := Map()
         dialog.SetFont("s10", "Segoe UI")
-        dialog.AddText("w490", "Press a combination in a box. Include Ctrl, Alt or Win.`nLeave a box empty to disable that shortcut.")
+        dialog.AddText("w600", "Press a combination in a box. Include Ctrl, Alt or WinKey.`nLeave a box empty to disable that combination.")
         for row in this.InstalledRows() {
-            dialog.AddText("xm y+16 w130", row.Language)
-            hotkeyControl := dialog.AddHotkey("x+10 yp-3 w235", row.Shortcut.Control)
-            winControl := dialog.AddCheckbox("x+12 yp+3", "Win")
+            dialog.AddText("xm y+12 w130 h26 +0x200", row.Language)
+            ; Keep a checkbox name for accessibility; its visible label follows
+            ; the Windows symbol. All rows use the same vertical center and x's.
+            winControl := dialog.AddCheckbox("x+10 yp w18 h26", "WinKey")
+            winIcon := dialog.AddText("x+2 yp w18 h26")
+            winIcon.GetPos(&iconX, &iconY)
+            symbolParts := []
+            ; Four native rectangles keep the symbol sharp at every DPI and
+            ; cannot turn into a missing-font box. SS_BLACKRECT is 0x4.
+            Loop 4 {
+                square := dialog.AddText("x" (iconX + Mod(A_Index - 1, 2) * 9)
+                    " y" (iconY + 5 + Floor((A_Index - 1) / 2) * 9) " w7 h7 +0x4")
+                square.OnEvent("Click", this.ToggleWindowsModifier.Bind(this, winControl))
+                symbolParts.Push(square)
+            }
+            winLabel := dialog.AddText("x" (iconX + 22) " y" iconY " w68 h26 +0x200", "WinKey +")
+            winIcon.OnEvent("Click", this.ToggleWindowsModifier.Bind(this, winControl))
+            winLabel.OnEvent("Click", this.ToggleWindowsModifier.Bind(this, winControl))
+            hotkeyControl := dialog.AddHotkey("x+8 yp w235 h26", row.Shortcut.Control)
             winControl.Value := row.Shortcut.Win
-            this.Controls[row.Name] := {Hotkey: hotkeyControl, Win: winControl}
+            this.Controls[row.Name] := {Hotkey: hotkeyControl, Win: winControl,
+                WindowsIcon: winIcon, WindowsLabel: winLabel, WindowsParts: symbolParts}
         }
-        dialog.AddText("xm y+18 w490", "One press converts the selection after a 350 ms double-tap window.`nHold the modifiers and tap the same key twice to select all`nand convert. Neither action waits for you to release the keys.")
-        this.Status := dialog.AddText("xm y+12 w490 cRed", "")
+        dialog.AddText("xm y+18 w600", "One press converts the selection after a 350 ms double-tap window.`nHold the modifiers and tap the same key twice to select all`nand convert. Neither action waits for you to release the keys.")
+        this.Status := dialog.AddText("xm y+12 w600 cRed", "")
         dialog.AddButton("xm y+8 w130", "Restore defaults").OnEvent("Click", this.RestoreDefaults.Bind(this))
         dialog.AddButton("x+55 w100 Default", "Save").OnEvent("Click", this.SaveDialog.Bind(this))
         dialog.AddButton("x+10 w100", "Cancel").OnEvent("Click", this.CloseDialog.Bind(this))
@@ -410,6 +433,11 @@ class KeyboardShortcutManager {
         this.ResetTap()
         dialog.Show()
     }
+
+    ToggleWindowsModifier(control, *) => control.Value := !control.Value
+
+    ; The factory keeps native Show interruption checks out of GUI construction.
+    CreateSettingsDialog() => Gui(, "Ceratops Keyboard Layout - Key Combinations")
 
     RestoreDefaults(*) {
         defaults := KeyboardShortcutSettings.Defaults()

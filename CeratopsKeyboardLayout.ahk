@@ -9,11 +9,34 @@ global IUIAutomationActivateScreenReader := 0
 
 global Converter := KeyboardConverter()
 if A_LineFile = A_ScriptFullPath {
-    A_IconTip := "Ceratops Keyboard Layout: single tap converts selection; double tap converts all"
-    TraySetIcon(A_ScriptDir "\CeratopsKeyboardLayout.ico")
+    InitializeAppTray(A_ScriptDir "\CeratopsKeyboardLayout.ico")
     global Shortcuts := KeyboardShortcutManager(Converter)
     Shortcuts.Start()
     StartAppUpdateCheck()
+}
+
+InitializeAppTray(iconFile, setIcon := TraySetIcon, clearTooltip := HideAppTrayTooltip) {
+    ; Optional callbacks let tests interrupt either native effect in isolation.
+    ; TraySetIcon selects the ICO's small image at Windows' tray dimensions.
+    ; The artwork already fills that height; larger source pixels cannot grow
+    ; the shell-owned slot. Freeze the same artwork during pause/suspend.
+    setIcon(iconFile, 1, true)
+    clearTooltip()
+    ; Explorer recreates the icon with AHK's default tooltip after a restart.
+    ; Defer clearing until its normal TaskbarCreated handler has added it.
+    static afterExplorerRestart := (*) => SetTimer(HideAppTrayTooltip, -1)
+    OnMessage(DllCall("RegisterWindowMessageW", "Str", "TaskbarCreated", "UInt"), afterExplorerRestart)
+}
+
+HideAppTrayTooltip(*) {
+    ; A_IconTip := "" restores the script name. NIF_TIP with an empty szTip
+    ; actually removes the hover tooltip, without changing clicks or balloons.
+    ; AHK uses its callback message (0x404) as the notification icon ID too.
+    data := Buffer(A_PtrSize = 8 ? 976 : 956, 0)
+    NumPut("UInt", data.Size, data)
+    NumPut("Ptr", A_ScriptHwnd, data, A_PtrSize)
+    NumPut("UInt", 0x404, "UInt", 0x4, data, A_PtrSize * 2)
+    return DllCall("Shell32\Shell_NotifyIconW", "UInt", 1, "Ptr", data, "Int")
 }
 
 StartAppUpdateCheck(manual := false, launch := Run) {

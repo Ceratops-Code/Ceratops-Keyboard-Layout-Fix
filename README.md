@@ -18,7 +18,7 @@ shortcut, without restarting Ceratops. It reads Windows' available-layout list
 once per request and reuses its conversion tables unless that list changes.
 At startup, installed copies check GitHub for a newer stable release and ask
 before upgrading. **Check for updates** in the tray menu runs the same check
-on demand and reports when the app is up to date or the check fails.
+on demand and reports when the app is up to date, with a green check, or the check fails.
 Ceratops stays usable during the check and downloads. The
 updater prepares both installers first and restores the previous version if
 the new installation fails. Both installers retain the registered installation
@@ -39,8 +39,12 @@ editor limitations, and removal.
 | Ctrl+Alt+double E, H, or R | Select all and convert the whole text field |
 
 Right-click the green tray icon to see the combinations for installed supported
-keyboards. Choose **Change shortcuts...**, press a combination in each box, and
-save. The Win checkbox adds the Windows key; an empty box disables a shortcut.
+keyboards, with the combinations aligned on the left. Choose **Change key
+combinations...** or double-click the tray icon to open **Key Combinations**.
+Press a combination in each box and save. The checkbox before the Windows
+symbol and **WinKey +** adds the Windows key; an empty box disables a shortcut.
+The tray icon has no hover tooltip. Its artwork fills the available height;
+Windows controls the tray slot size.
 Settings are shared by this installation, in
 `%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini`. They survive upgrades and
 are removed on uninstall. Other running sessions reload them when their tray

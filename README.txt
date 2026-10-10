@@ -12,9 +12,12 @@ field instead. Only one conversion runs, so punctuation is not converted
 twice. Neither action waits for key release, even when the keys stay held.
 
 Right-click the green tray icon to see the current combinations for installed
-supported keyboards, the single/double-tap explanation, and Change shortcuts...
-Press a combination in each box, optionally check Win to add the Windows key,
+supported keyboards, the single/double-tap explanation, and Change key combinations...
+Double-clicking the tray icon opens the same Key Combinations window.
+Press a combination in each box, optionally check WinKey + to add the Windows key,
 then Save. Include Ctrl, Alt or Win; leaving a box empty disables that shortcut.
+Combinations share the left edge in the tray menu. The icon has no hover tooltip;
+its artwork fills the height of the tray slot, whose size Windows controls.
 Restore defaults resets the displayed rows. Each combination belongs to one
 language. A combination reserved by an absent language's saved shortcut still
 needs a different assignment. Cancel leaves the current shortcuts unchanged.
@@ -110,7 +113,7 @@ An offline or unavailable GitHub API does not interrupt the app or show errors.
 Only the registered installed copy checks; unpacked source copies skip it.
 The check sends no text or clipboard content to GitHub.
 Choose Check for updates from the green tray icon's menu to check on demand.
-This reports when Ceratops is up to date, the check cannot connect, or another
+This reports when Ceratops is up to date with a green check, the check cannot connect, or another
 check is already running. If a newer stable version is available, it asks
 before downloading and uses the same installation and recovery flow below.
 
@@ -225,6 +228,8 @@ cache junction refusal and busy/abandoned update locks. It substitutes HTTP
 and installer boundaries and never installs software or changes a service.
 Run it with powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
 Tests\Test-AppUpdates.ps1, optionally passing -TempRoot for its private files.
+Use -CasePattern to run only matching check names. Success notices also have
+repeat and interruption cases around opening, closing and reporting their result.
 Tests\Test-KeyConversion.ahk exercises the layout maps, every installed-layout
 subset, live additions/removals, unchanged-cache reuse, failed layout queries,
 shortcut parsing and shared settings, failed-save recovery, tap timing,
@@ -249,6 +254,9 @@ key-conversion suite also accepts that argument for its settings fixture.
 Their private settings files are removed on completion. The default for the
 key-conversion suite is the repository parent's tmp project test directory.
 Windows must be unlocked for accessibility and foreground shortcut checks.
+Pass --ui-only after the shortcut test's temp-root argument to check the Key
+Combinations dialog, tray menu, double-click and interruption behavior without
+registering global shortcuts, sending keyboard input or stopping the service.
 
 Dependencies
 The Ceratops source code and installer script use the MIT license in LICENSE.
