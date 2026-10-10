@@ -240,25 +240,51 @@ class FakeGitHub:
         self.publications = 0
         self.uploads: list[str] = []
         self.fail_upload: int | None = None
+        self.requests: list[str] = []
+        self.other_releases: list[dict[str, Any]] = []
 
     def asset(self, name: str) -> dict[str, str]:
         return {"name": name, "state": "uploaded", "digest": "sha256:" + self.record["artifacts"][name]}
 
     def request(self, root: pathlib.Path, endpoint: str, *, payload: Any = None,
                 method: str = "GET", missing_ok: bool = False) -> Any:
+        if "/git/ref/tags/" in endpoint:
+            return None if self.tag_commit is None else {"object": {"type": "commit", "sha": self.tag_commit}}
         if "/commits/" in endpoint:
             if self.tag_commit is None and missing_ok:
                 return None
             return {"sha": self.tag_commit}
+        if "/releases?" in endpoint:
+            page = int(endpoint.rsplit("page=", 1)[1]) - 1
+            releases = self.other_releases + ([self.release] if self.release else [])
+            return copy.deepcopy(releases[page * 100:(page + 1) * 100])
+        if "/releases/tags/" in endpoint and self.release and self.release["draft"]:
+            return None
         if method == "POST":
             self.creations += 1
-            self.release = {"id": 1, "target_commitish": payload["target_commitish"], "draft": True, "assets": []}
+            self.release = {"id": 1, "tag_name": payload["tag_name"], "target_commitish": payload["target_commitish"], "draft": True, "assets": []}
         elif method == "PATCH":
             assert self.release is not None
             self.publications += 1
             self.release["draft"] = False
             self.tag_commit = self.commit
         return copy.deepcopy(self.release)
+
+    def api_command(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        """Expose GitHub's distinct absent-ref and unknown-commit responses."""
+        endpoint = argv[2]
+        self.requests.append(endpoint)
+        if "/commits/" in endpoint and self.tag_commit is None:
+            value = {"status": "422", "message": "No commit found for SHA: v1.0.10"}
+            code = 1
+        else:
+            payload = json.loads(kwargs["input"]) if kwargs.get("input") else None
+            value = self.request(self.bundle, endpoint, payload=payload,
+                                 method=argv[argv.index("--method") + 1], missing_ok=True)
+            code = 0 if value is not None else 1
+            if value is None:
+                value = {"status": "404", "message": "Not Found"}
+        return subprocess.CompletedProcess(argv, code, json.dumps(value).encode(), b"")
 
     def command(self, argv: list[str], root: pathlib.Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         if argv[:3] == ["gh", "repo", "view"]:
@@ -279,7 +305,7 @@ class PublishTests(unittest.TestCase):
         self.root = pathlib.Path(temporary.name)
         self.record = {"version": "1.0.10", "artifacts": {release.SETUP_NAME: "installer-digest", "source.zip": "source-digest"}}
         self.github = FakeGitHub(self.root, self.record)
-        self.enterContext(mock.patch.object(release, "github_json", side_effect=self.github.request))
+        self.enterContext(mock.patch.object(release.subprocess, "run", side_effect=self.github.api_command))
         self.enterContext(mock.patch.object(release, "run_command", side_effect=self.github.command))
 
     def publish(self) -> None:
@@ -291,16 +317,24 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.github.publications, 1)
         self.assertEqual(set(self.github.uploads), set(self.record["artifacts"]))
 
+    def test_missing_tag_checks_refs_before_resolving_commit(self) -> None:
+        self.publish()
+        self.assertIn("/git/ref/tags/", self.github.requests[0])
+        self.assertEqual(sum("/commits/" in endpoint for endpoint in self.github.requests), 1)
+        self.assertFalse(any("/releases/tags/" in endpoint for endpoint in self.github.requests))
+
     def test_interrupted_upload_resumes_draft_and_skips_finished_asset(self) -> None:
         self.github.fail_upload = 2
         with self.assertRaisesRegex(release.ReleaseError, "interrupted"):
             self.publish()
         self.assertEqual(self.github.publications, 0)
+        self.github.other_releases = [{"tag_name": f"other-{index}"} for index in range(100)]
         self.github.fail_upload = None
         self.publish()
         self.assertEqual(self.github.creations, 1)
         self.assertEqual(len(self.github.uploads), 3)
         self.assertEqual(self.github.publications, 1)
+        self.assertTrue(any("page=2" in endpoint for endpoint in self.github.requests))
 
     def test_matching_published_release_has_no_repeated_side_effects(self) -> None:
         self.publish()
@@ -317,7 +351,7 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.github.uploads, [])
 
     def test_different_existing_asset_is_never_overwritten(self) -> None:
-        self.github.release = {"id": 1, "target_commitish": self.github.commit, "draft": True,
+        self.github.release = {"id": 1, "tag_name": "v1.0.10", "target_commitish": self.github.commit, "draft": True,
                                "assets": [{"name": release.SETUP_NAME, "state": "uploaded", "digest": "sha256:other"}]}
         with self.assertRaisesRegex(release.ReleaseError, "not be overwritten"):
             self.publish()
@@ -325,15 +359,21 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.github.publications, 0)
 
     def test_published_release_with_missing_asset_is_left_intact(self) -> None:
-        self.github.release = {"id": 1, "target_commitish": self.github.commit, "draft": False, "assets": []}
+        self.github.release = {"id": 1, "tag_name": "v1.0.10", "target_commitish": self.github.commit, "draft": False, "assets": []}
         with self.assertRaisesRegex(release.ReleaseError, "will not be modified"):
             self.publish()
         self.assertEqual(self.github.uploads, [])
 
+    def test_duplicate_drafts_are_refused_before_creation(self) -> None:
+        self.github.other_releases = [{"tag_name": "v1.0.10"}, {"tag_name": "v1.0.10"}]
+        with self.assertRaisesRegex(release.ReleaseError, "Multiple releases"):
+            self.publish()
+        self.assertEqual(self.github.creations, 0)
+
 
 class GitHubResponseTests(unittest.TestCase):
     def test_only_404_can_mean_a_missing_release(self) -> None:
-        for status in (401, 403, 429, 503):
+        for status in (401, 403, 422, 429, 503):
             response = subprocess.CompletedProcess([], 1, json.dumps({"status": str(status), "message": "denied"}).encode(), b"")
             with self.subTest(status=status), mock.patch.object(release.subprocess, "run", return_value=response):
                 with self.assertRaises(release.ReleaseError):

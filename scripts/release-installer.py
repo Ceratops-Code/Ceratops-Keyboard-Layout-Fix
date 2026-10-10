@@ -342,21 +342,39 @@ def release_assets_match(release: Mapping[str, Any], artifacts: Mapping[str, str
     return present
 
 
+def find_release_by_tag(root: pathlib.Path, repository: str, tag: str) -> Any:
+    """Find drafts as well as published releases; ambiguous drafts fail closed."""
+    matches: list[dict[str, Any]] = []
+    for page in range(1, 101):
+        releases = github_json(root, f"repos/{repository}/releases?per_page=100&page={page}")
+        matches.extend(release for release in releases if release["tag_name"] == tag)
+        if len(matches) > 1:
+            raise ReleaseError(f"Multiple releases use {tag}; choose the intended draft first.")
+        if len(releases) < 100:
+            return matches[0] if matches else None
+    raise ReleaseError("The release listing exceeds the supported page limit.")
+
+
 def publish_installer(root: pathlib.Path, bundle: pathlib.Path, record: Mapping[str, Any], commit: str) -> None:
     """Resume matching drafts; an already-published matching release is success."""
     repository = run_command(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], root).stdout.decode().strip()
     tag = f"v{record['version']}"
-    endpoint = f"repos/{repository}/releases/tags/{tag}"
-    tag_commit = github_json(root, f"repos/{repository}/commits/{tag}", missing_ok=True)
+    # Missing refs return 404; the commits endpoint reports an unknown tag as
+    # 422. Check existence through refs, then let GitHub peel annotated tags.
+    tag_ref = github_json(root, f"repos/{repository}/git/ref/tags/{tag}", missing_ok=True)
+    tag_commit = github_json(root, f"repos/{repository}/commits/{tag}") if tag_ref is not None else None
     if tag_commit is not None and tag_commit["sha"] != commit:
         raise ReleaseError(f"{tag} already points to a different source commit.")
-    release = github_json(root, endpoint, missing_ok=True)
+    # The by-tag endpoint promises published releases. List releases to find
+    # resumable drafts, then address the selected release by its stable ID.
+    release = find_release_by_tag(root, repository, tag)
     if release is None:
         release = github_json(root, f"repos/{repository}/releases", method="POST", payload={
             "tag_name": tag, "target_commitish": commit, "name": f"Ceratops Keyboard Layout {record['version']}",
             "draft": True, "generate_release_notes": True,
             "body": "Standalone Windows installer. AutoHotkey's corresponding GPL source is attached.",
         })
+    endpoint = f"repos/{repository}/releases/{release['id']}"
     if release["target_commitish"] != commit:
         raise ReleaseError("The draft release belongs to a different source commit.")
     present = release_assets_match(release, record["artifacts"])
