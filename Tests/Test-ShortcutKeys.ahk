@@ -28,11 +28,21 @@ DismissToolbar(*) {
 }
 SendDoubleShortcut(key) {
     ; Keep both modifiers down across the two distinct key presses.
-    SendInput("{Ctrl down}{Alt down}{vk" key "}")
+    SendTestKeys("{Ctrl down}{Alt down}{vk" key "}")
     Sleep(80)
-    SendInput("{vk" key "}{Alt up}{Ctrl up}")
+    SendTestKeys("{vk" key "}{Alt up}{Ctrl up}")
+}
+SendTestKeys(keys) {
+    ; Exercise AHK's real hooks with input above their level. The converter's
+    ; own level-zero sends must never recursively trigger configured shortcuts.
+    priorLevel := A_SendLevel
+    SendLevel(1)
+    try SendEvent(keys)
+    finally SendLevel(priorLevel)
 }
 try {
+    if !WinExist("A")
+        throw Error("The interactive desktop is unavailable. Unlock Windows before running this check.")
     ; AutoHotkey's hidden window title starts with the full script path.
     SetTitleMatchMode(2)
     DetectHiddenWindows(true)
@@ -40,21 +50,58 @@ try {
     ; Two global listeners make synthetic shortcut results meaningless.
     if WinExist("CeratopsKeyboardLayout.ahk ahk_class AutoHotkey")
         throw Error("Stop the Ceratops service and wait for its tray app to exit before testing hotkeys.")
-    Run('"' A_AhkPath '" "' A_ScriptDir '\..\CeratopsKeyboardLayout.ahk"', , , &converterPid)
-    DetectHiddenWindows(true)
-    WinWait("ahk_pid " converterPid " ahk_class AutoHotkey", , 3)
+    if !A_Args.Length
+        throw Error("Supply the caller-owned task temp root as the first argument.")
+    settingsDirectory := A_Args[1] "\shortcut-desktop-" DllCall("GetCurrentProcessId")
+    settings := KeyboardShortcutSettings(settingsDirectory "\Shortcuts.ini")
+    shortcuts := KeyboardShortcutManager(Converter, settings)
+    shortcuts.Start()
+    if DllCall("GetMenuItemCount", "Ptr", A_TrayMenu.Handle) != Converter.Layouts.Count + 6
+        throw Error("Tray menu does not show the installed languages and shortcut help")
+    shortcuts.ShowSettings()
+    if shortcuts.Controls.Count != Converter.Layouts.Count
+        throw Error("Settings dialog shows a keyboard that is not installed")
+    for name, control in shortcuts.Controls {
+        control.Hotkey.Focus()
+        SendTestKeys("^!{F9}")
+        if KeyboardShortcutSettings.Parse(control.Hotkey.Value).Hotkey != "^!vk78"
+            throw Error("Configured shortcut was intercepted instead of captured in the settings box")
+        control.Hotkey.Value := KeyboardShortcutSettings.Parse(shortcuts.Assignments[name]).Control
+    }
+    shortcuts.Controls["en"].Hotkey.Value := "^+F8"
+    shortcuts.SaveDialog()
+    if shortcuts.Dialog
+        throw Error("Settings dialog could not save: " shortcuts.Status.Text)
+    if settings.Load()["en"] != "^+vk77"
+        throw Error("Custom shortcut was not saved to the shared preference file")
     fixture := Gui(, "Keyboard shortcut test")
     toolbar := {open: false, dismissals: 0}
     fixture.OnEvent("Escape", DismissToolbar)
     inputControl := fixture.AddEdit("w420 r3", "שלום")
     toolbarControl := fixture.AddEdit("ReadOnly w120", "Formatting toolbar")
     fixture.Show()
+    WinActivate("ahk_id " fixture.Hwnd)
     inputControl.Focus()
     if !WinWaitActive("ahk_id " fixture.Hwnd, , 2)
-        throw Error("Test editor did not become active")
+        throw Error("Test editor did not become active; foreground=" WinGetProcessName("A")
+            " class=" WinGetClass("A") " fixture-visible=" DllCall("IsWindowVisible", "Ptr", fixture.Hwnd))
     Sleep(150)
     editorThread := DllCall("GetWindowThreadProcessId", "Ptr", inputControl.Hwnd, "Ptr", 0, "UInt")
     priorLayout := DllCall("GetKeyboardLayout", "UInt", editorThread, "Ptr")
+    ; A single tap's decision window starts at key-down, while both modifiers
+    ; and the key remain held. No key-up is sent until after the assertion.
+    SendMessage(0xB1, 0, StrLen(inputControl.Value), inputControl.Hwnd)
+    SendTestKeys("{Ctrl down}{Shift down}{F8 down}")
+    deadline := A_TickCount + 1000
+    while inputControl.Value != "akuo" && A_TickCount < deadline
+        Sleep(10)
+    if inputControl.Value != "akuo"
+        throw Error("Saved shortcut did not convert while its keys were still held")
+    if !GetKeyState("Ctrl") || !GetKeyState("Shift") || !GetKeyState("F8")
+        throw Error("Held-modifier check did not keep the invoking keys down")
+    SendTestKeys("{F8 up}{Shift up}{Ctrl up}")
+    shortcuts.Apply(KeyboardShortcutSettings.Defaults())
+    inputControl.Value := "שלום"
     expectedText := Map("en", "akuo", "he", "שלום", "ru", "флгщ")
     for target, layout in Converter.Layouts {
         language := KeyboardConverter.Languages[target]
@@ -92,10 +139,9 @@ try {
         inputControl.Focus()
         if !WinWaitActive("ahk_id " fixture.Hwnd, , 2)
             throw Error("Test editor lost focus before repeated shortcut")
-        SendInput("^!{vk" key "}")
+        SendTestKeys("^!{vk" key "}")
         focusAfterSend := WinGetProcessName("A")
-        ; The single-tap handler waits 350 ms; check promptly afterward so
-        ; unrelated desktop activity cannot invalidate this focus assertion.
+        ; Allow the editor to settle before checking its selection and focus.
         Sleep(450)
         if !WinActive("ahk_id " fixture.Hwnd)
             throw Error("Repeated shortcut " key " check lost test editor focus to "
@@ -110,7 +156,7 @@ try {
     inputControl.Value := "prefix שלום suffix"
     inputControl.Focus()
     SendMessage(0xB1, 7, 11, inputControl.Hwnd)
-    SendInput("^!{vk45}")
+    SendTestKeys("^!{vk45}")
     deadline := A_TickCount + 3000
     while inputControl.Value != "prefix akuo suffix" && A_TickCount < deadline {
         if !WinActive("ahk_id " fixture.Hwnd)
@@ -183,18 +229,19 @@ try {
         throw Error("Repeated accessibility conversion left text selected")
     if !richField.HasFocus()
         throw Error("No-op conversion hid the editor caret")
-    try FileAppend("PASS single/double hotkeys, unavailable targets and 2 accessibility conversions`n", "*")
+    try FileAppend("PASS shortcut settings/capture, held modifiers, single/double hotkeys, unavailable targets and 2 accessibility conversions`n", "*")
     code := 0
 } catch Error as failure {
     try FileAppend("FAIL: " failure.Message "`n", "*")
     code := 1
 } finally {
-    ; Closing AutoHotkey's main window only hides it. End only the exact child
-    ; process created by this test so its global hotkeys cannot remain active.
-    try ProcessClose(converterPid)
+    ; Always release synthetic input, including when a held-key assertion fails.
+    try SendTestKeys("{F8 up}{Shift up}{vk45 up}{Alt up}{Ctrl up}")
     try DllCall("PostMessageW", "Ptr", inputControl.Hwnd, "UInt", 0x50,
         "UPtr", 0, "Ptr", priorLayout)
     try fixture.Destroy()
     try WinActivate("ahk_id " originalWindow)
+    if IsSet(settingsDirectory)
+        try DirDelete(settingsDirectory, true)
 }
 ExitApp(code)

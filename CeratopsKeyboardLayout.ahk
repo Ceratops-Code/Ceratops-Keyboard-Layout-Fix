@@ -5,17 +5,14 @@
 ; screen-reader setting. Runtime text, clipboard backups and maps stay in RAM.
 global IUIAutomationActivateScreenReader := 0
 #Include Lib\UIA.ahk
+#Include Manage-KeyboardShortcuts.ahk
 
 global Converter := KeyboardConverter()
 if A_LineFile = A_ScriptFullPath {
     A_IconTip := "Ceratops Keyboard Layout: single tap converts selection; double tap converts all"
     TraySetIcon(A_ScriptDir "\CeratopsKeyboardLayout.ico")
-    ; The portable install has no AutoHotkey helper apps such as Window Spy.
-    A_TrayMenu.Delete()
-    A_TrayMenu.Add("Exit Ceratops Keyboard Layout", (*) => ExitApp())
-    ; Bind the target now: loop variables must not be captured by reference.
-    for name, language in KeyboardConverter.Languages
-        Hotkey("^!" language.Key, HandleConversionShortcut.Bind(name, language.Key))
+    global Shortcuts := KeyboardShortcutManager(Converter)
+    Shortcuts.Start()
     StartAppUpdateCheck()
 }
 
@@ -28,17 +25,6 @@ StartAppUpdateCheck() {
     try Run('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
         . ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
         . A_ScriptDir '\Update-AppInstall.ps1"', A_ScriptDir, "Hide")
-}
-
-; Waiting for the first release prevents key auto-repeat from becoming a
-; double tap. The second physical press must arrive within 350 ms while both
-; modifiers remain down. #MaxThreadsPerHotkey suppresses a second callback
-; while KeyWait observes that press.
-HandleConversionShortcut(target, key, *) {
-    window := WinExist("A")
-    KeyWait(key)
-    doubleTap := KeyWait(key, "D T0.35") && GetKeyState("Ctrl") && GetKeyState("Alt")
-    ConvertFocusedText(target, window, doubleTap ? "all" : "selected")
 }
 
 class KeyboardConverter {
@@ -535,13 +521,8 @@ ConvertOneFocusedText(target, window, behavior) {
         ; Reject an unavailable target before asking an editor to select or copy.
         Converter.RequireInstalledLayout(target)
         canSwitch := true
-        ; Avoid sending Ctrl+A/V while the invoking modifiers are still down.
-        keys := ["Ctrl", "Alt"]
-        for name, language in KeyboardConverter.Languages
-            keys.Push(language.Key)
-        for key in keys
-            if !KeyWait(key, "T2")
-                throw Error("Release the shortcut keys, then try again.")
+        ; Ordinary (non-Blind) SendInput releases unnecessary held modifiers
+        ; around Ctrl+A/C/V and restores them. Never wait for physical release.
         if !WinActive("ahk_id " window)
             return
         field := FocusedTextField(window)

@@ -37,6 +37,13 @@ if A_Args.Length && A_Args[1] = "--collapse-only" {
     ExitApp(0)
 }
 
+; UIA providers require an accessible desktop even for a background fixture.
+; Stop before creating controls instead of hanging inside the provider on lock.
+if !WinExist("A") {
+    try FileAppend("BLOCKED: Unlock Windows before running accessibility checks.`n", "*")
+    ExitApp(2)
+}
+
 checks := 0
 ; Route fixture selection and replacement to its own HWND without stealing
 ; focus. Populate/read the clipboard in this process: background WM_COPY and

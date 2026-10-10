@@ -5,8 +5,22 @@ Ctrl+Alt+H converts selected text to Hebrew Standard.
 Ctrl+Alt+R converts selected text to Russian.
 Keep Ctrl+Alt held and tap the same letter twice within 350 ms to select all
 and convert the entire field. Holding a letter is not a double tap. A single
-tap waits briefly for a possible second tap. With no selection, a single tap
+tap waits for a 350 ms double-tap window measured from key-down. With no selection, a single tap
 leaves the text alone and still switches the active keyboard layout.
+The second press of a double tap immediately selects all and converts the
+field instead. Only one conversion runs, so punctuation is not converted
+twice. Neither action waits for key release, even when the keys stay held.
+
+Right-click the green tray icon to see the current combinations for installed
+supported keyboards, the single/double-tap explanation, and Change shortcuts...
+Press a combination in each box, optionally check Win to add the Windows key,
+then Save. Include Ctrl, Alt or Win; leaving a box empty disables that shortcut.
+Restore defaults resets the displayed rows. Each combination belongs to one
+language. A combination reserved by an absent language's saved shortcut still
+needs a different assignment. Cancel leaves the current shortcuts unchanged.
+One installation-wide settings file is shared by all accounts. Upgrades keep
+the choices; uninstall removes them. A running app in another session reloads
+shared changes the next time its tray menu opens. No settings watcher is used.
 
 The keys work by physical keyboard position, not by translation or phonetics.
 For example, Hebrew א becomes English t, and Hebrew ד becomes English s.
@@ -126,6 +140,17 @@ The tray menu omits AutoHotkey tools such as Window Spy, which this portable
 installation does not include.
 
 Storage and lifecycle
+Manage-KeyboardShortcuts.ahk owns
+%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini. Setup creates this data-only
+folder with local-user write access; Program Files remains protected. Settings
+are read at app start and when its tray menu or settings dialog opens. Save
+checks all assignments, stages the new file and atomically replaces the current
+file; a failed save restores the previous live shortcuts. Under an exclusive
+delete-on-close Shortcuts.ini.lock, startup and each save remove an orphaned
+Shortcuts.ini.pending. Successful saves leave only the current INI, with no
+history or logs. Symbolic links/junctions are refused so the elevated app cannot
+write through user-substituted paths. Settings are data, never executable code.
+Uninstall removes these exact settings files and the directory if it is empty.
 The protected Program Files directory owns the scripts, pinned runtime, UIA
 dependency, licenses and icon assets. It contains the current application
 version and, during updates, the protected UpdateCache subdirectory.
@@ -198,6 +223,7 @@ Run it with powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
 Tests\Test-AppUpdates.ps1, optionally passing -TempRoot for its private files.
 Tests\Test-KeyConversion.ahk exercises the layout maps, every installed-layout
 subset, live additions/removals, unchanged-cache reuse, failed layout queries,
+shortcut parsing and shared settings, failed-save recovery, tap timing,
 list markers, selected and whole-field conversion, undo, clipboard
 preservation and deselection. The test PC needs all supported layouts to
 exercise real Win32 key output; subset checks simulate missing keyboards.
@@ -205,7 +231,7 @@ Tests\Test-AccessibleConversion.ahk checks selected-text accessibility, rich
 list clipboard conversion, duplicate-marker prevention, unsafe-rich-copy
 refusal, and paste in a background
 test field. Tests\Test-ShortcutKeys.ahk exercises single
-and double global hotkeys, language changes and focused accessibility Ctrl+A
+and double global hotkeys, settings capture, held modifiers, language changes and focused accessibility Ctrl+A
 conversion with toolbar focus recovery and hidden-selection clearing. Run the latter
 only after the installed service has stopped and its tray app has exited;
 another global listener would invalidate the shortcut check.
@@ -214,6 +240,11 @@ Windows desktop for the key-conversion and accessibility checks. Run the
 shortcut test there after the installed service has stopped. Run each test
 with CeratopsKeyboardLayout.exe
 /ErrorStdOut=UTF-8 and the test's script path, and wait for the process to exit.
+Pass a caller-owned task temp root as the shortcut test's first argument; the
+key-conversion suite also accepts that argument for its settings fixture.
+Their private settings files are removed on completion. The default for the
+key-conversion suite is the repository parent's tmp project test directory.
+Windows must be unlocked for accessibility and foreground shortcut checks.
 
 Dependencies
 The Ceratops source code and installer script use the MIT license in LICENSE.
