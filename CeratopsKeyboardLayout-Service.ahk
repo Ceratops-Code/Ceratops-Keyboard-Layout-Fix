@@ -13,6 +13,7 @@ global ServiceStatusHandle := 0
 global ServiceControlCallback := 0
 global ServiceMainCallback := 0
 global CompanionProcesses := Map()
+global SkipInitialUpdateCheck := false
 
 if A_Args.Length = 3 && A_Args[1] = "--preflight" {
     try outcome := PreflightElevatedLaunch(A_Args[2])
@@ -23,8 +24,9 @@ if A_Args.Length = 3 && A_Args[1] = "--preflight" {
         ExitApp(2)
     ExitApp(outcome = "OK" ? 0 : 1)
 }
-if A_Args.Length = 3 && A_Args[1] = "--install" {
-    outcome := InstallElevatedService(A_Args[2])
+if (A_Args.Length = 3 || A_Args.Length = 4) && A_Args[1] = "--install" {
+    skipUpdateCheck := A_Args.Length = 4 && A_Args[4] = "--skip-update-check"
+    outcome := InstallElevatedService(A_Args[2], skipUpdateCheck)
     try FileAppend(outcome "`n", A_Args[3], "UTF-8-RAW")
     catch Error
         ExitApp(2)
@@ -71,7 +73,7 @@ ExitApp(0)
 ; Files. The one-time task checks the actual SYSTEM token launch before any
 ; persistent service exists. Every task and probe file is removed on success
 ; and failure; setup retains only the one-line outcome until it displays it.
-InstallElevatedService(tempDirectory) {
+InstallElevatedService(tempDirectory, skipUpdateCheck := false) {
     global ServiceName
     if !A_IsAdmin
         return "FALLBACK Installer is not elevated"
@@ -89,7 +91,7 @@ InstallElevatedService(tempDirectory) {
             return "FALLBACK " probeResult
         }
         try {
-            RegisterAndStartService(existingPath != "")
+            RegisterAndStartService(existingPath != "", skipUpdateCheck)
             return "SERVICE_INSTALLED"
         } catch Error as failure {
             RemoveOwnedService()
@@ -199,7 +201,7 @@ StopService(serviceHandle) {
         throw Error("Service did not stop")
 }
 
-RegisterAndStartService(alreadyExists) {
+RegisterAndStartService(alreadyExists, skipUpdateCheck := false) {
     global ServiceName
     manager := OpenServiceManager(0x3)
     service := 0
@@ -225,8 +227,14 @@ RegisterAndStartService(alreadyExists) {
             if !service
                 throw Error("CreateService " A_LastError)
         }
-        if !DllCall("advapi32\StartServiceW", "Ptr", service, "UInt", 0,
-            "Ptr", 0, "Int")
+        ; SCM start arguments are temporary, unlike ImagePath. An upgrade must
+        ; not prompt again when its replacement tray instance starts.
+        startArgument := "--skip-update-check"
+        startArguments := Buffer(A_PtrSize, 0)
+        NumPut("Ptr", StrPtr(startArgument), startArguments)
+        if !DllCall("advapi32\StartServiceW", "Ptr", service,
+            "UInt", skipUpdateCheck ? 1 : 0,
+            "Ptr", skipUpdateCheck ? startArguments.Ptr : 0, "Int")
             throw Error("StartService " A_LastError)
         if !WaitForServiceState(service, 4)
             throw Error("Service did not reach running state")
@@ -304,6 +312,12 @@ ProbeElevatedLaunch() {
 ; so logon and reconnect work without a scheduled task or interactive service.
 ServiceMain(argumentCount, arguments) {
     global ServiceName, ServiceStatusHandle, ServiceControlCallback, ServiceStopRequested
+    global SkipInitialUpdateCheck
+    ; The first SCM argument is the service name; the remainder belong only to
+    ; this start. Never persist the updater's suppression in service settings.
+    Loop Max(0, argumentCount - 1)
+        if StrGet(NumGet(arguments, A_Index * A_PtrSize, "Ptr")) = "--skip-update-check"
+            SkipInitialUpdateCheck := true
     ServiceStatusHandle := DllCall("advapi32\RegisterServiceCtrlHandlerExW",
         "Str", ServiceName, "Ptr", ServiceControlCallback, "Ptr", 0, "Ptr")
     if !ServiceStatusHandle
@@ -352,12 +366,14 @@ SetServiceState(state, acceptedControls := 0, exitCode := 0) {
 }
 
 StartMissingCompanions() {
-    global CompanionProcesses
+    global CompanionProcesses, SkipInitialUpdateCheck
     for sessionId in ActiveUserSessions() {
         if CompanionProcesses.Has(sessionId)
             continue
-        try CompanionProcesses[sessionId] := LaunchDesktopCompanion(sessionId).handle
+        try CompanionProcesses[sessionId] := LaunchDesktopCompanion(sessionId,
+            false, false, SkipInitialUpdateCheck).handle
     }
+    SkipInitialUpdateCheck := false
     ; A user Exit is respected for the rest of that sign-in. Once the session
     ; logs off and its token disappears, its id may be used by a future logon.
     forgottenSessions := []
@@ -406,7 +422,8 @@ ActiveUserSessions() {
     return result
 }
 
-LaunchDesktopCompanion(sessionId, suspended := false, requireElevation := false) {
+LaunchDesktopCompanion(sessionId, suspended := false, requireElevation := false,
+    skipUpdateCheck := false) {
     userToken := 0, linkedToken := 0, primaryToken := 0, environment := 0
     try {
         if !DllCall("wtsapi32\WTSQueryUserToken", "UInt", sessionId,
@@ -448,6 +465,8 @@ LaunchDesktopCompanion(sessionId, suspended := false, requireElevation := false)
         executable := A_ScriptDir "\CeratopsKeyboardLayout.exe"
         script := A_ScriptDir "\CeratopsKeyboardLayout.ahk"
         command := '"' executable '" /script "' script '"'
+        if skipUpdateCheck
+            command .= " --skip-update-check"
         commandLine := Buffer(StrPut(command, "UTF-16") * 2, 0)
         StrPut(command, commandLine, "UTF-16")
         desktop := "winsta0\default"

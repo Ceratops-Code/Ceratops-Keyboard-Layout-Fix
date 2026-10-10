@@ -1,7 +1,7 @@
 ; Rebuild with Inno Setup 6's ISCC.exe from this directory. The protected
 ; Program Files copy owns the SYSTEM service and its desktop companion.
 #define AppName "Ceratops Keyboard Layout"
-#define AppVersion "1.0.10"
+#define AppVersion "1.0.11"
 
 [Setup]
 AppName={#AppName}
@@ -34,10 +34,14 @@ RestartApplications=no
 [InstallDelete]
 Type: files; Name: "{commonstartup}\{#AppName}.lnk"
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\UpdateCache"
+
 [Files]
 Source: "CeratopsKeyboardLayout.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "CeratopsKeyboardLayout.ahk"; DestDir: "{app}"; Flags: ignoreversion
 Source: "CeratopsKeyboardLayout-Service.ahk"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Update-AppInstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "CeratopsKeyboardLayout.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "CeratopsKeyboardLayout.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dependencies.json"; DestDir: "{app}"; Flags: ignoreversion
@@ -52,7 +56,7 @@ Name: "{group}\{#AppName}"; Filename: "{app}\CeratopsKeyboardLayout.exe"; Parame
 Name: "{commonstartup}\{#AppName}"; Filename: "{app}\CeratopsKeyboardLayout.exe"; Parameters: """{app}\CeratopsKeyboardLayout.ahk"""; WorkingDir: "{app}"; IconFilename: "{app}\CeratopsKeyboardLayout.ico"; Check: UseStartupFallback
 
 [Run]
-Filename: "{app}\CeratopsKeyboardLayout.exe"; Parameters: """{app}\CeratopsKeyboardLayout.ahk"""; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: UseStartupFallback
+Filename: "{app}\CeratopsKeyboardLayout.exe"; Parameters: "{code:GetStartupParameters}"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: UseStartupFallback
 
 [Code]
 var
@@ -61,6 +65,18 @@ var
 function UseStartupFallback: Boolean;
 begin
   Result := StartupFallback;
+end;
+
+function IsUpdaterInstallation: Boolean;
+begin
+  Result := ExpandConstant('{param:CERATOPSUPGRADE|0}') = '1';
+end;
+
+function GetStartupParameters(Param: String): String;
+begin
+  Result := '"' + ExpandConstant('{app}\CeratopsKeyboardLayout.ahk') + '"';
+  if IsUpdaterInstallation then
+    Result := Result + ' --skip-update-check';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -83,15 +99,18 @@ procedure ConfigureService;
 var
   ResultCode: Integer;
   Outcome: AnsiString;
-  OutcomePath, RuntimePath, ServiceScriptPath: String;
+  OutcomePath, RuntimePath, ServiceScriptPath, InstallParameters: String;
 begin
   StartupFallback := True;
   OutcomePath := ExpandConstant('{tmp}\CeratopsServiceOutcome.txt');
   DeleteFile(OutcomePath);
   RuntimePath := ExpandConstant('{app}\CeratopsKeyboardLayout.exe');
   ServiceScriptPath := ExpandConstant('{app}\CeratopsKeyboardLayout-Service.ahk');
-  if Exec(RuntimePath, '/script "' + ServiceScriptPath + '" --install "' +
-      ExpandConstant('{tmp}') + '" "' + OutcomePath + '"',
+  InstallParameters := '/script "' + ServiceScriptPath + '" --install "' +
+    ExpandConstant('{tmp}') + '" "' + OutcomePath + '"';
+  if IsUpdaterInstallation then
+    InstallParameters := InstallParameters + ' --skip-update-check';
+  if Exec(RuntimePath, InstallParameters,
       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     StartupFallback := ResultCode <> 0;
   if StartupFallback then begin

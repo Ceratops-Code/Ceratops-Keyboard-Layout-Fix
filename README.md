@@ -13,6 +13,11 @@ in. It uses whichever of the supported keyboard layouts are installed in
 Windows; missing Hebrew or Russian keyboards do not prevent it from starting.
 A shortcut for an unavailable target shows a brief message and leaves the
 text, selection, clipboard, and active keyboard untouched.
+At startup, installed copies check GitHub for a newer stable release and ask
+before upgrading. Ceratops stays usable during the check and downloads. The
+updater prepares both installers first and restores the previous version if
+the new installation fails. Offline checks are quiet; portable copies do not
+upgrade the installed app.
 See [the user guide](README.txt) for installation, shortcut behavior,
 editor limitations, and removal.
 
@@ -40,6 +45,7 @@ corresponding GPL source archive. Matching draft uploads resume after interrupti
 published assets are never overwritten. The app's SDLC `install` action consumes
 the same successful build and runs setup silently from an administrator terminal.
 Building alone does not publish or install it.
-The [user guide](README.txt) lists the
-desktop regression checks; GitHub CI validates the repository without trying
-to run interactive desktop tests on a hosted runner.
+The [user guide](README.txt) lists the desktop regression checks.
+`Tests/Test-AppUpdates.ps1` checks release selection, consent, download integrity,
+rollback and cache retention without installing software. GitHub CI runs the
+same updater and packaging checks; interactive desktop checks run locally.

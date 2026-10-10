@@ -16,6 +16,18 @@ if A_LineFile = A_ScriptFullPath {
     ; Bind the target now: loop variables must not be captured by reference.
     for name, language in KeyboardConverter.Languages
         Hotkey("^!" language.Key, HandleConversionShortcut.Bind(name, language.Key))
+    StartAppUpdateCheck()
+}
+
+StartAppUpdateCheck() {
+    ; Setup suppresses only its own immediate restart. Future Windows sign-ins
+    ; and manual launches check normally. The separate helper cannot block keys.
+    for argument in A_Args
+        if argument = "--skip-update-check"
+            return
+    try Run('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
+        . ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
+        . A_ScriptDir '\Update-AppInstall.ps1"', A_ScriptDir, "Hide")
 }
 
 ; Waiting for the first release prevents key auto-repeat from becoming a
