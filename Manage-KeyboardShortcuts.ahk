@@ -205,6 +205,8 @@ class KeyboardShortcutSettings {
 }
 
 class KeyboardShortcutManager {
+    static TrayOwner := 0
+
     __New(converter, settings := unset) {
         this.Converter := converter
         this.Settings := IsSet(settings) ? settings : KeyboardShortcutSettings()
@@ -214,6 +216,10 @@ class KeyboardShortcutManager {
         this.Dispatch := this.ProcessRequests.Bind(this)
         this.SingleTap := this.ExpireSingleTap.Bind(this)
         this.Context := this.CanHandleShortcut.Bind(this)
+        this.MenuOpen := false, this.MenuFont := 0, this.MenuRows := Map()
+        this.SuppressLeftUp := false
+        this.OpenMenu := this.ShowTrayMenu.Bind(this)
+        this.OpenSettings := this.ShowSettings.Bind(this)
     }
 
     Start() {
@@ -223,9 +229,6 @@ class KeyboardShortcutManager {
             warning := "Using default shortcuts. " failure.Message
         this.ReplaceBindings(this.Assignments)
         this.RebuildTray()
-        ; AutoHotkey's tray callback precedes its standard context menu.
-        this.TrayCallback := this.OnTrayMessage.Bind(this)
-        OnMessage(0x404, this.TrayCallback)
         if warning != ""
             TrayTip(warning, "Ceratops Keyboard Layout")
     }
@@ -345,21 +348,52 @@ class KeyboardShortcutManager {
     }
 
     RebuildTray() {
+        rows := this.InstalledRows()
+        layout := this.MeasureTrayColumns(rows)
+        previousOwner := KeyboardShortcutManager.TrayOwner
+        ; Native items borrow our buffers and font until they are removed.
         A_TrayMenu.Delete()
-        ; A native tab separates the language and accelerator columns, so
-        ; proportional characters and custom combinations cannot shift names.
-        for row in this.InstalledRows()
-            A_TrayMenu.Add(row.Language "`t" StrReplace(row.Shortcut.Label, "+", " + "),
-                this.ShowSettings.Bind(this))
+        if previousOwner
+            previousOwner.ReleaseMenuFont()
+        this.MenuFont := layout.Font, this.MenuLayout := layout, this.MenuRows := Map()
+        KeyboardShortcutManager.TrayOwner := this
+        ; One router follows the current owner, including after a settings or
+        ; layout rebuild. Old managers cannot paint a newer manager's menu.
+        static listener := (w, l, message, hwnd) => KeyboardShortcutManager.TrayOwner.RouteTrayMessage(w, l, message, hwnd)
+        static listening := false
+        if !listening {
+            for message in [0x404, 0x2B, 0x2C]
+                OnMessage(message, listener)
+            listening := true
+        }
+        for index, row in rows {
+            label := row.Language "`t" row.ShortcutText
+            A_TrayMenu.Add(label, this.ShowSettings.Bind(this))
+            itemId := DllCall("GetMenuItemID", "Ptr", A_TrayMenu.Handle, "Int", index - 1, "UInt")
+            ; MSAAMENUINFO keeps a spoken name for Windows accessibility even
+            ; though these two text columns are drawn by this app.
+            row.AccessibleText := Buffer((StrLen(label) + 1) * 2, 0)
+            StrPut(label, row.AccessibleText, "UTF-16")
+            row.AccessibleInfo := Buffer(A_PtrSize = 8 ? 16 : 12, 0)
+            NumPut("UInt", 0xAA0DF00D, "UInt", StrLen(label), row.AccessibleInfo)
+            NumPut("Ptr", row.AccessibleText.Ptr, row.AccessibleInfo, 8)
+            item := Buffer(A_PtrSize = 8 ? 80 : 48, 0)
+            NumPut("UInt", item.Size, "UInt", 0x120, "UInt", 0x100, item)
+            NumPut("Ptr", row.AccessibleInfo.Ptr, item, A_PtrSize = 8 ? 48 : 32)
+            if !DllCall("SetMenuItemInfoW", "Ptr", A_TrayMenu.Handle, "UInt", index - 1,
+                "Int", true, "Ptr", item)
+                throw OSError()
+            this.MenuRows[itemId] := row
+        }
         if !this.Converter.Layouts.Count {
             A_TrayMenu.Add("No supported keyboards installed", (*) => 0)
             A_TrayMenu.Disable("No supported keyboards installed")
         }
         A_TrayMenu.Add()
-        A_TrayMenu.Add("Single tap: convert selected text", (*) => 0)
-        A_TrayMenu.Disable("Single tap: convert selected text")
-        A_TrayMenu.Add("Double tap: select all and convert", (*) => 0)
-        A_TrayMenu.Disable("Double tap: select all and convert")
+        A_TrayMenu.Add("Single tap: selection", (*) => 0)
+        A_TrayMenu.Disable("Single tap: selection")
+        A_TrayMenu.Add("Double tap: all text", (*) => 0)
+        A_TrayMenu.Disable("Double tap: all text")
         settingsItem := "Change key combinations..."
         A_TrayMenu.Add(settingsItem, this.ShowSettings.Bind(this))
         if !this.Converter.Layouts.Count
@@ -368,7 +402,119 @@ class KeyboardShortcutManager {
         A_TrayMenu.ClickCount := 2
         A_TrayMenu.Add("Check for updates", (*) => StartAppUpdateCheck(true))
         A_TrayMenu.Add()
-        A_TrayMenu.Add("Exit Ceratops Keyboard Layout", (*) => ExitApp())
+        A_TrayMenu.Add("Exit", (*) => ExitApp())
+    }
+
+    ReleaseMenuFont() {
+        if this.MenuFont
+            DllCall("Gdi32\DeleteObject", "Ptr", this.MenuFont)
+        this.MenuFont := 0
+    }
+
+    MeasureTrayColumns(rows) {
+        ; Use the actual Windows menu font, not spaces or an assumed character
+        ; width. Both columns begin at fixed pixel positions at the current DPI.
+        dpi := DllCall("GetDpiForWindow", "Ptr", A_ScriptHwnd, "UInt")
+        metrics := Buffer(504, 0)
+        NumPut("UInt", metrics.Size, metrics)
+        if !DllCall("SystemParametersInfoForDpi", "UInt", 0x29, "UInt", metrics.Size,
+            "Ptr", metrics, "UInt", 0, "UInt", dpi)
+            throw OSError()
+        font := DllCall("Gdi32\CreateFontIndirectW", "Ptr", metrics.Ptr + 224, "Ptr")
+        if !font
+            throw OSError()
+        dc := DllCall("GetDC", "Ptr", 0, "Ptr")
+        prior := DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", font, "Ptr")
+        languageWidth := 0, shortcutWidth := 0, textHeight := 0
+        try {
+            for row in rows {
+                row.ShortcutText := StrReplace(row.Shortcut.Label, "+", " + ")
+                for text in [row.Language, row.ShortcutText] {
+                    size := Buffer(8, 0)
+                    if !DllCall("Gdi32\GetTextExtentPoint32W", "Ptr", dc, "Str", text,
+                        "Int", StrLen(text), "Ptr", size)
+                        throw OSError()
+                    if text = row.Language
+                        languageWidth := Max(languageWidth, NumGet(size, 0, "Int"))
+                    else
+                        shortcutWidth := Max(shortcutWidth, NumGet(size, 0, "Int"))
+                    textHeight := Max(textHeight, NumGet(size, 4, "Int"))
+                }
+            }
+        } catch {
+            DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", prior)
+            DllCall("Gdi32\DeleteObject", "Ptr", font)
+            throw
+        } finally {
+            DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", prior)
+            DllCall("ReleaseDC", "Ptr", 0, "Ptr", dc)
+        }
+        left := Round(24 * dpi / 96), gap := Round(16 * dpi / 96)
+        return {Font: font, LanguageX: left, ShortcutX: left + languageWidth + gap,
+            Width: left + languageWidth + gap + shortcutWidth + Round(12 * dpi / 96),
+            Height: Max(textHeight + Round(8 * dpi / 96),
+                DllCall("GetSystemMetricsForDpi", "Int", 15, "UInt", dpi)), Gap: gap}
+    }
+
+    RouteTrayMessage(wParam, lParam, message, hwnd) {
+        if message = 0x404
+            return this.OnTrayMessage(wParam, lParam)
+        if NumGet(lParam, 0, "UInt") != 1 || !this.MenuRows.Has(NumGet(lParam, 8, "UInt"))
+            return
+        if message = 0x2C {
+            NumPut("UInt", this.MenuLayout.Width, "UInt", this.MenuLayout.Height, lParam, 12)
+            return true
+        }
+        return this.DrawTrayRow(lParam)
+    }
+
+    DrawTrayRow(data) {
+        pointerOffset := A_PtrSize = 8 ? 24 : 20
+        if NumGet(data, pointerOffset, "Ptr") != A_TrayMenu.Handle
+            return
+        dc := NumGet(data, pointerOffset + A_PtrSize, "Ptr")
+        rectangle := data + pointerOffset + A_PtrSize * 2
+        row := this.MenuRows[NumGet(data, 8, "UInt")]
+        selected := NumGet(data, 16, "UInt") & 1
+        state := selected ? 2 : 1
+        saved := DllCall("Gdi32\SaveDC", "Ptr", dc)
+        theme := DllCall("UxTheme\OpenThemeData", "Ptr", A_ScriptHwnd, "Str", "Menu", "Ptr")
+        try {
+            DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", this.MenuFont)
+            DllCall("Gdi32\SetBkMode", "Ptr", dc, "Int", 1)
+            DllCall("FillRect", "Ptr", dc, "Ptr", rectangle,
+                "Ptr", DllCall("GetSysColorBrush", "Int", selected && !theme ? 13 : 4, "Ptr"))
+            if theme
+                DllCall("UxTheme\DrawThemeBackground", "Ptr", theme, "Ptr", dc,
+                    "Int", 14, "Int", state, "Ptr", rectangle, "Ptr", 0)
+            else
+                DllCall("Gdi32\SetTextColor", "Ptr", dc, "UInt",
+                    DllCall("GetSysColor", "Int", selected ? 14 : 7, "UInt"))
+            this.DrawTrayColumn(dc, rectangle, row.Language, this.MenuLayout.LanguageX,
+                this.MenuLayout.ShortcutX - this.MenuLayout.Gap, theme, state)
+            this.DrawTrayColumn(dc, rectangle, row.ShortcutText, this.MenuLayout.ShortcutX,
+                this.MenuLayout.Width, theme, state)
+        } finally {
+            if theme
+                DllCall("UxTheme\CloseThemeData", "Ptr", theme)
+            DllCall("Gdi32\RestoreDC", "Ptr", dc, "Int", saved)
+        }
+        return true
+    }
+
+    DrawTrayColumn(dc, rowRectangle, text, start, finish, theme, state) {
+        rectangle := Buffer(16, 0)
+        DllCall("RtlMoveMemory", "Ptr", rectangle, "Ptr", rowRectangle, "UPtr", 16)
+        left := NumGet(rectangle, 0, "Int")
+        NumPut("Int", left + start, rectangle, 0)
+        NumPut("Int", left + finish, rectangle, 8)
+        ; DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX keeps the first
+        ; symbol fixed even when saved combinations have different lengths.
+        if theme
+            DllCall("UxTheme\DrawThemeText", "Ptr", theme, "Ptr", dc, "Int", 14,
+                "Int", state, "Str", text, "Int", -1, "UInt", 0x824, "UInt", 0, "Ptr", rectangle)
+        else
+            DllCall("DrawTextW", "Ptr", dc, "Str", text, "Int", -1, "Ptr", rectangle, "UInt", 0x824)
     }
 
     Refresh() {
@@ -386,12 +532,50 @@ class KeyboardShortcutManager {
     }
 
     OnTrayMessage(wParam, lParam, *) {
-        if (lParam & 0xFFFF) = 0x205 || (lParam & 0xFFFF) = 0x7B {
+        event := lParam & 0xFFFF
+        if event = 0x201 {
+            this.SuppressLeftUp := false
+            return
+        }
+        if event = 0x203 {
+            this.SuppressLeftUp := true
+            SetTimer(this.OpenMenu, 0)
+            if this.MenuOpen
+                DllCall("EndMenu")
+            SetTimer(this.OpenSettings, -1)
+            return 0
+        }
+        if event = 0x202 {
+            ; The first up precedes a possible double-click. Wait for Windows'
+            ; interval, then consume the final up of a double-click so it cannot
+            ; schedule a stray popup over the settings window. A new down resets
+            ; the flag even when an earlier release occurred outside the icon.
+            suppressed := this.SuppressLeftUp
+            this.SuppressLeftUp := false
+            if !suppressed && !this.MenuOpen
+                SetTimer(this.OpenMenu, -DllCall("GetDoubleClickTime", "UInt"))
+            return 0
+        }
+        if event = 0x205 || event = 0x7B || event = 0x400 || event = 0x401 {
+            if !this.MenuOpen
+                SetTimer(this.OpenMenu, -1)
+            return 0
+        }
+    }
+
+    ShowTrayMenu(*) {
+        if this.MenuOpen
+            return
+        this.MenuOpen := true
+        try {
             try this.Refresh()
             catch Error as failure
                 TrayTip(failure.Message, "Ceratops Keyboard Layout")
-        }
+            this.ShowNativeTrayMenu()
+        } finally this.MenuOpen := false
     }
+
+    ShowNativeTrayMenu() => A_TrayMenu.Show()
 
     ShowSettings(*) {
         if this.Dialog {
@@ -409,9 +593,11 @@ class KeyboardShortcutManager {
         dialog.AddText("w600", "Press a combination in a box. Include Ctrl, Alt or WinKey.`nLeave a box empty to disable that combination.")
         for row in this.InstalledRows() {
             dialog.AddText("xm y+12 w130 h26 +0x200", row.Language)
-            ; Keep a checkbox name for accessibility; its visible label follows
-            ; the Windows symbol. All rows use the same vertical center and x's.
-            winControl := dialog.AddCheckbox("x+10 yp w18 h26", "WinKey")
+            ; A narrow caption can leak letter fragments at another DPI. Draw
+            ; no caption; annotate its accessible name separately. The visible
+            ; label follows the flag, with the same centers and x's in each row.
+            winControl := dialog.AddCheckbox("x+10 yp w18 h26")
+            this.SetCheckboxAccessibleName(winControl, "WinKey")
             winIcon := dialog.AddText("x+2 yp w22 h26 +0x201", Chr(0xF0FF))
             ; Wingdings ships with Windows and supplies its recognizable flag
             ; glyph. Keep the symbol in its own control and font.
@@ -437,6 +623,25 @@ class KeyboardShortcutManager {
     }
 
     ToggleWindowsModifier(control, *) => control.Value := !control.Value
+
+    SetCheckboxAccessibleName(control, name := "") {
+        ; Windows' dynamic annotation keeps the native checkbox usable by
+        ; screen readers without drawing hidden text. This app's x64 runtime
+        ; passes the 16-byte by-value GUID indirectly. An empty name removes
+        ; our annotation before the owned checkbox HWND is destroyed.
+        static service := ComObject("{B5F8350B-0548-48B1-A6EE-88BD00B4A5E7}",
+            "{6E26E776-04F0-495D-80E4-3330352E3169}")
+        static property := Buffer(16, 0)
+        if !NumGet(property, 0, "UInt")
+            DllCall("Ole32\CLSIDFromString", "WStr", "{608D3DF8-8128-4AA7-A428-F55E49267291}",
+                "Ptr", property, "HResult")
+        if name != ""
+            ComCall(7, service, "Ptr", control.Hwnd, "UInt", 0xFFFFFFFC, "UInt", 0,
+                "Ptr", property, "WStr", name)
+        else
+            ComCall(9, service, "Ptr", control.Hwnd, "UInt", 0xFFFFFFFC, "UInt", 0,
+                "Ptr", property, "Int", 1)
+    }
 
     ; The factory keeps native Show interruption checks out of GUI construction.
     CreateSettingsDialog() => Gui(, "Ceratops Keyboard Layout - Key Combinations")
@@ -481,8 +686,11 @@ class KeyboardShortcutManager {
     }
 
     CloseDialog(*) {
-        if this.Dialog
+        if this.Dialog {
+            for name, control in this.Controls
+                this.SetCheckboxAccessibleName(control.Win)
             this.Dialog.Destroy()
+        }
         this.Dialog := 0
         this.ResetTap()
     }

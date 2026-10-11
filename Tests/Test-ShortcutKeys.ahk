@@ -1,5 +1,8 @@
 ﻿#Requires AutoHotkey v2.0.19+
 #Include ..\CeratopsKeyboardLayout.ahk
+; Popup observers are separate workers of this same test file. Each owns a
+; PID-specific temp root and must not terminate the parent test process.
+#SingleInstance Off
 originalWindow := WinExist("A")
 Codes(value) {
     result := ""
@@ -70,6 +73,212 @@ class InterruptedShortcutInterface extends KeyboardShortcutManager {
     FaultBoundary := ""
     CreateSettingsDialog() => InterruptedSettingsWindow(super.CreateSettingsDialog(), this)
 }
+
+class ObservedTrayMenu extends KeyboardShortcutManager {
+    static CurrentObserver := 0
+    FaultBoundary := ""
+    OpenCount := 0
+    ObservePath := ""
+
+    ShowNativeTrayMenu() {
+        if this.FaultBoundary = "before"
+            throw Error("interface-test-interruption")
+        if FileExist(this.ObservePath)
+            FileDelete(this.ObservePath)
+        command := '"' A_AhkPath '" /ErrorStdOut=UTF-8 "' A_ScriptFullPath
+            . '" --observe-menu ' DllCall("GetCurrentProcessId", "UInt") " " A_ScriptHwnd
+            . " " A_TrayMenu.Handle " " this.Converter.Layouts.Count ' "' this.ObservePath '"'
+        Run(command, , "Hide", &observer)
+        ObservedTrayMenu.CurrentObserver := observer
+        try {
+            super.ShowNativeTrayMenu()
+            if ProcessWaitClose(observer, 8)
+                throw Error("The menu observer did not finish")
+            result := FileRead(this.ObservePath, "UTF-8")
+            if SubStr(result, 1, 5) != "PASS|"
+                throw Error(result)
+            this.OpenCount += 1
+        } finally {
+            if ProcessExist(observer)
+                ProcessClose(observer)
+            ObservedTrayMenu.CurrentObserver := 0
+            if FileExist(this.ObservePath)
+                FileDelete(this.ObservePath)
+        }
+        if this.FaultBoundary = "after"
+            throw Error("interface-test-interruption")
+    }
+}
+
+ObserveNativeTrayMenu(parentPid, parentWindow, menuHandle, languageCount, output) {
+    try {
+        hwnd := WinWait("ahk_class #32768 ahk_pid " parentPid, , 5)
+        if !hwnd
+            throw Error("The tray click did not display a native popup")
+        WinGetPos(&x, &y, &width, &height, "ahk_id " hwnd)
+        dpi := DllCall("GetDpiForWindow", "Ptr", hwnd, "UInt")
+        if width > Round(330 * dpi / 96)
+            throw Error("The default tray menu is still unnecessarily wide: " width)
+        ; Use the existing UIA client, including its COM lifetime handling,
+        ; against the real cross-process Windows popup, not our item buffers.
+        children := UIA.ElementFromHandle(hwnd, , 0).GetChildren()
+        expected := KeyboardShortcutManager(Converter).InstalledRows()
+        if expected.Length != languageCount || children.Length < languageCount
+            throw Error("The popup exposed the wrong number of installed languages")
+        Loop languageCount {
+            if children[A_Index].Name != expected[A_Index].Language
+                throw Error("Windows accessibility lost a language row's name")
+        }
+        FileOpen(output, "w", "UTF-8").Write("PASS|" width "|" height)
+    } catch Error as failure {
+        FileOpen(output, "w", "UTF-8").Write("FAIL: " failure.Message " (observer line " failure.Line "; " failure.Extra ")")
+    } finally {
+        DllCall("PostMessageW", "Ptr", parentWindow, "UInt", 0x1F, "Ptr", 0, "Ptr", 0)
+    }
+}
+
+PostTestTrayNotification(event) {
+    if !DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", event)
+        throw OSError()
+}
+
+CheckTrayDoubleClickSequence(menu) {
+    ; Use Windows' down/up/double-click/up sequence through the script's native
+    ; shell callback. Posting the double-click alone misses a premature popup.
+    interval := DllCall("GetDoubleClickTime", "UInt")
+    Loop 2 {
+        before := menu.OpenCount
+        hwnd := menu.Dialog.Hwnd
+        menu.Dialog.Hide()
+        for event in [0x201, 0x202]
+            PostTestTrayNotification(event)
+        Sleep(Max(1, Min(50, interval // 4)))
+        if menu.MenuOpen || menu.OpenCount != before
+            throw Error("The first left click opened a popup before double-click detection finished")
+        for event in [0x203, 0x202]
+            PostTestTrayNotification(event)
+        deadline := A_TickCount + 1000
+        while !DllCall("IsWindowVisible", "Ptr", hwnd) && A_TickCount < deadline
+            Sleep(10)
+        if !DllCall("IsWindowVisible", "Ptr", hwnd) || menu.Dialog.Hwnd != hwnd
+            throw Error("The complete double-click sequence did not show the current settings window")
+        Sleep(interval + 50)
+        if menu.MenuOpen || menu.OpenCount != before
+            throw Error("The final release of a double-click opened a stray popup")
+    }
+}
+
+CheckTrayClicksAndInterruptions(shortcuts, directory) {
+    if !DirExist(directory)
+        DirCreate(directory)
+    menu := ObservedTrayMenu(shortcuts.Converter, shortcuts.Settings)
+    menu.ObservePath := directory "\menu-observation.txt"
+    menu.RebuildTray()
+    ; Keep an owned foreground window while observing the popup. No keys or
+    ; mouse clicks are injected into the user's applications.
+    menu.ShowSettings()
+    try {
+        CheckTrayDoubleClickSequence(menu)
+        for event in [0x202, 0x205] {
+            before := menu.OpenCount
+            if event = 0x202
+                PostTestTrayNotification(0x201)
+            PostTestTrayNotification(event)
+            deadline := A_TickCount + 8000
+            while menu.OpenCount = before && A_TickCount < deadline
+                Sleep(10)
+            if menu.OpenCount != before + 1 || menu.MenuOpen
+                throw Error("A left/right tray click did not open and close exactly one menu")
+        }
+        for boundary in ["before", "after"] {
+            menu.FaultBoundary := boundary
+            ExpectInterfaceInterruption(menu.ShowTrayMenu.Bind(menu))
+            if menu.MenuOpen
+                throw Error("An interrupted popup stranded the menu-open flag")
+            menu.FaultBoundary := ""
+            before := menu.OpenCount
+            menu.ShowTrayMenu()
+            menu.ShowTrayMenu()
+            if menu.OpenCount != before + 2
+                throw Error("Fresh repeated menu requests did not display their current menu")
+        }
+    } finally {
+        menu.CloseDialog()
+        shortcuts.RebuildTray()
+    }
+}
+
+CheckRenderedTrayColumns(shortcuts) {
+    layout := shortcuts.MenuLayout
+    dc := DllCall("Gdi32\CreateCompatibleDC", "Ptr", 0, "Ptr")
+    screen := DllCall("GetDC", "Ptr", 0, "Ptr")
+    bitmap := DllCall("Gdi32\CreateCompatibleBitmap", "Ptr", screen,
+        "Int", layout.Width, "Int", layout.Height, "Ptr")
+    prior := DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", bitmap, "Ptr")
+    DllCall("ReleaseDC", "Ptr", 0, "Ptr", screen)
+    firstInk := -1
+    try {
+        for itemId, row in shortcuts.MenuRows {
+            measure := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+            NumPut("UInt", 1, measure)
+            NumPut("UInt", itemId, measure, 8)
+            if !DllCall("SendMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x2C, "Ptr", 0, "Ptr", measure)
+                throw Error("The real native measurement message was not handled")
+            if NumGet(measure, 12, "UInt") > layout.Width || NumGet(measure, 16, "UInt") <= 0
+                throw Error("The language row has an invalid native size")
+            draw := Buffer(A_PtrSize = 8 ? 64 : 48, 0)
+            NumPut("UInt", 1, draw)
+            NumPut("UInt", itemId, "UInt", 1, draw, 8)
+            offset := A_PtrSize = 8 ? 24 : 20
+            NumPut("Ptr", A_TrayMenu.Handle, "Ptr", dc, draw, offset)
+            NumPut("Int", 0, "Int", 0, "Int", layout.Width, "Int", layout.Height,
+                draw, offset + A_PtrSize * 2)
+            if !DllCall("SendMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x2B, "Ptr", 0, "Ptr", draw)
+                throw Error("The real native draw message was not handled")
+            ; Read actual ink from the rendered bitmap. Different final keys
+            ; must not move the first C of these default Ctrl combinations.
+            ink := -1
+            Loop layout.Width - layout.ShortcutX {
+                x := layout.ShortcutX + A_Index - 1
+                Loop layout.Height {
+                    color := DllCall("Gdi32\GetPixel", "Ptr", dc, "Int", x, "Int", A_Index - 1, "UInt")
+                    if (color & 255) < 100 && ((color >> 8) & 255) < 100 && ((color >> 16) & 255) < 100 {
+                        ink := x
+                        break
+                    }
+                }
+                if ink >= 0
+                    break
+            }
+            if ink < 0 || (firstInk >= 0 && ink != firstInk)
+                throw Error("Rendered shortcut text does not share its first-symbol position")
+            firstInk := ink
+        }
+    } finally {
+        DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", prior)
+        DllCall("Gdi32\DeleteObject", "Ptr", bitmap)
+        DllCall("Gdi32\DeleteDC", "Ptr", dc)
+    }
+}
+
+StopUiCheck(failure, *) {
+    global uiManager, uiDirectory, originalWindow
+    try FileAppend("FAIL: " failure.Message " (line " failure.Line ")`n", "*")
+    if ObservedTrayMenu.CurrentObserver && ProcessExist(ObservedTrayMenu.CurrentObserver)
+        try ProcessClose(ObservedTrayMenu.CurrentObserver)
+    if IsSet(uiManager)
+        try uiManager.CloseDialog()
+    if IsSet(uiDirectory) && DirExist(uiDirectory)
+        try DirDelete(uiDirectory, true)
+    try WinActivate("ahk_id " originalWindow)
+    ExitApp(1)
+}
+
+StopMenuObserver(failure, *) {
+    try FileOpen(A_Args[6], "w", "UTF-8").Write("FAIL: " failure.Message " (observer line " failure.Line "; " failure.Extra ")")
+    DllCall("PostMessageW", "Ptr", A_Args[3], "UInt", 0x1F, "Ptr", 0, "Ptr", 0)
+    ExitApp(1)
+}
 InterruptInterfaceEffect(operation, effect, selectedEffect, boundary, parameters*) {
     if effect = selectedEffect && boundary = "before"
         throw Error("interface-test-interruption")
@@ -121,6 +330,16 @@ CheckInterfaceInterruptions(shortcuts) {
             if fixture.Dialog.Hwnd != hwnd
                 throw Error("Repeated settings requests created duplicate windows")
             for name, control in fixture.Controls {
+                ; Repeat naming and removal around their real Windows effects.
+                ; A fresh call restores the screen-reader name without putting
+                ; caption text back into the narrow drawing rectangle.
+                for caption in ["WinKey", ""] {
+                    operation := fixture.SetCheckboxAccessibleName.Bind(fixture, control.Win, caption)
+                    ExpectInterfaceInterruption(InterruptInterfaceEffect.Bind(
+                        operation, "name", "name", boundary))
+                    fixture.SetCheckboxAccessibleName(control.Win, "WinKey")
+                    CheckWindowsModifierCaption(control.Win)
+                }
                 before := control.Win.Value
                 ExpectInterfaceInterruption(InterruptInterfaceEffect.Bind(
                     fixture.ToggleWindowsModifier.Bind(fixture, control.Win), "toggle", "toggle", boundary))
@@ -135,6 +354,16 @@ CheckInterfaceInterruptions(shortcuts) {
     }
 }
 
+CheckWindowsModifierCaption(control) {
+    ; Inspect the native control, not source text or an app-owned label. Even
+    ; when the checkbox is wider on another display, it must have no caption
+    ; to leak beside its check mark, and must retain its accessible name.
+    if DllCall("GetWindowTextLengthW", "Ptr", control.Hwnd)
+        throw Error("The Windows-key checkbox can draw stray caption fragments")
+    if UIA.ElementFromHandle(control.Hwnd).Name != "WinKey"
+        throw Error("The captionless Windows-key checkbox lost its accessible name")
+}
+
 CheckKeyCombinationInterface(shortcuts) {
     InitializeAppTray(A_ScriptDir "\..\CeratopsKeyboardLayout.ico")
     if !HideAppTrayTooltip()
@@ -143,16 +372,34 @@ CheckKeyCombinationInterface(shortcuts) {
     if A_TrayMenu.Default != "Change key combinations..." || A_TrayMenu.ClickCount != 2
         throw Error("The tray default does not open key combinations on a double-click")
     for index, row in shortcuts.InstalledRows() {
-        text := Buffer(1024, 0)
-        DllCall("GetMenuStringW", "Ptr", A_TrayMenu.Handle, "UInt", index - 1,
-            "Ptr", text, "Int", 512, "UInt", 0x400)
-        label := StrGet(text)
+        item := Buffer(A_PtrSize = 8 ? 80 : 48, 0)
+        NumPut("UInt", item.Size, "UInt", 0x120, item)
+        if !DllCall("GetMenuItemInfoW", "Ptr", A_TrayMenu.Handle, "UInt", index - 1,
+            "Int", true, "Ptr", item)
+            throw OSError()
+        accessible := NumGet(item, A_PtrSize = 8 ? 48 : 32, "Ptr")
+        if NumGet(item, 8, "UInt") != 0x100 || NumGet(accessible, 0, "UInt") != 0xAA0DF00D
+            throw Error("The language row lost its native text and accessibility data")
+        label := StrGet(NumGet(accessible, 8, "Ptr"), "UTF-16")
         if label != row.Language "`t" StrReplace(row.Shortcut.Label, "+", " + ")
             throw Error("Tray languages and combinations are not in separate native columns")
     }
+    CheckRenderedTrayColumns(shortcuts)
+    originalAssignments := shortcuts.Assignments
+    try {
+        shortcuts.Assignments := originalAssignments.Clone()
+        custom := ["^!F1", "^!F12", "^+!PgUp"]
+        for index, row in shortcuts.InstalledRows()
+            shortcuts.Assignments[row.Name] := custom[index]
+        shortcuts.RebuildTray()
+        CheckRenderedTrayColumns(shortcuts)
+    } finally {
+        shortcuts.Assignments := originalAssignments
+        shortcuts.RebuildTray()
+    }
     ; Deliver the shell's double-click message to our own script window. This
     ; exercises AHK's default-item dispatch without moving the user's mouse.
-    DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", 0x203)
+    PostTestTrayNotification(0x203)
     deadline := A_TickCount + 1000
     while !shortcuts.Dialog && A_TickCount < deadline
         Sleep(10)
@@ -175,6 +422,7 @@ CheckKeyCombinationInterface(shortcuts) {
             throw Error("Key combination controls are not aligned across rows")
         if control.WindowsIcon.Text != Chr(0xF0FF) || control.WindowsLabel.Text != "WinKey +"
             throw Error("The Windows modifier label is missing")
+        CheckWindowsModifierCaption(control.Win)
         ; Inspect the selected native font and actual glyph coverage, so a
         ; missing-font box cannot satisfy the Windows-logo check.
         dc := DllCall("GetDC", "Ptr", control.WindowsIcon.Hwnd, "Ptr")
@@ -201,7 +449,7 @@ CheckKeyCombinationInterface(shortcuts) {
             control.Win.Value := before
         }
     }
-    DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", 0x203)
+    PostTestTrayNotification(0x203)
     Sleep(30)
     if shortcuts.Dialog.Hwnd != hwnd
         throw Error("A second tray double-click created a duplicate window")
@@ -269,6 +517,11 @@ WaitForDispatch(manager, queue, count) {
     if queue.Removed.Length != count || queue.Items.Length || manager.Processing
         throw Error("A shortcut queued " queue.Boundary " the empty check was stranded.")
 }
+if A_Args.Length && A_Args[1] = "--observe-menu" {
+    OnError(StopMenuObserver)
+    ObserveNativeTrayMenu(A_Args[2], A_Args[3], A_Args[4], A_Args[5], A_Args[6])
+    ExitApp()
+}
 if A_Args.Length && A_Args[A_Args.Length] = "--dispatch-only" {
     try {
         CheckDispatchInterruptions()
@@ -285,12 +538,14 @@ if A_Args.Length && A_Args[A_Args.Length] = "--dispatch-only" {
 ; shared settings, or stop an installed service. The full desktop suite also
 ; uses these same checks before testing real key capture and conversion.
 if A_Args.Length >= 2 && A_Args[2] = "--ui-only" {
+    OnError(StopUiCheck)
     uiDirectory := A_Args[1] "\shortcut-interface-" DllCall("GetCurrentProcessId")
     try {
         uiManager := KeyboardShortcutManager(Converter, KeyboardShortcutSettings(uiDirectory "\Shortcuts.ini"))
         CheckKeyCombinationInterface(uiManager)
         CheckInterfaceInterruptions(uiManager)
-        try FileAppend("PASS key combinations dialog, row alignment, tray double-click, tooltip removal and interrupted/fresh UI requests`n", "*")
+        CheckTrayClicksAndInterruptions(uiManager, uiDirectory)
+        try FileAppend("PASS compact native menu, first-symbol column alignment, both tray buttons, settings, accessibility and interrupted/fresh UI requests`n", "*")
         uiCode := 0
     } catch Error as failure {
         try FileAppend("FAIL: " failure.Message " (line " failure.Line "; " failure.Extra ")`n", "*")
