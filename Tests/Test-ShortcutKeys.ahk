@@ -137,6 +137,37 @@ ObserveNativeTrayMenu(parentPid, parentWindow, menuHandle, languageCount, output
     }
 }
 
+PostTestTrayNotification(event) {
+    if !DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", event)
+        throw OSError()
+}
+
+CheckTrayDoubleClickSequence(menu) {
+    ; Use Windows' down/up/double-click/up sequence through the script's native
+    ; shell callback. Posting the double-click alone misses a premature popup.
+    interval := DllCall("GetDoubleClickTime", "UInt")
+    Loop 2 {
+        before := menu.OpenCount
+        hwnd := menu.Dialog.Hwnd
+        menu.Dialog.Hide()
+        for event in [0x201, 0x202]
+            PostTestTrayNotification(event)
+        Sleep(Max(1, Min(50, interval // 4)))
+        if menu.MenuOpen || menu.OpenCount != before
+            throw Error("The first left click opened a popup before double-click detection finished")
+        for event in [0x203, 0x202]
+            PostTestTrayNotification(event)
+        deadline := A_TickCount + 1000
+        while !DllCall("IsWindowVisible", "Ptr", hwnd) && A_TickCount < deadline
+            Sleep(10)
+        if !DllCall("IsWindowVisible", "Ptr", hwnd) || menu.Dialog.Hwnd != hwnd
+            throw Error("The complete double-click sequence did not show the current settings window")
+        Sleep(interval + 50)
+        if menu.MenuOpen || menu.OpenCount != before
+            throw Error("The final release of a double-click opened a stray popup")
+    }
+}
+
 CheckTrayClicksAndInterruptions(shortcuts, directory) {
     if !DirExist(directory)
         DirCreate(directory)
@@ -147,9 +178,12 @@ CheckTrayClicksAndInterruptions(shortcuts, directory) {
     ; mouse clicks are injected into the user's applications.
     menu.ShowSettings()
     try {
+        CheckTrayDoubleClickSequence(menu)
         for event in [0x202, 0x205] {
             before := menu.OpenCount
-            DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", event)
+            if event = 0x202
+                PostTestTrayNotification(0x201)
+            PostTestTrayNotification(event)
             deadline := A_TickCount + 8000
             while menu.OpenCount = before && A_TickCount < deadline
                 Sleep(10)
@@ -296,6 +330,16 @@ CheckInterfaceInterruptions(shortcuts) {
             if fixture.Dialog.Hwnd != hwnd
                 throw Error("Repeated settings requests created duplicate windows")
             for name, control in fixture.Controls {
+                ; Repeat naming and removal around their real Windows effects.
+                ; A fresh call restores the screen-reader name without putting
+                ; caption text back into the narrow drawing rectangle.
+                for caption in ["WinKey", ""] {
+                    operation := fixture.SetCheckboxAccessibleName.Bind(fixture, control.Win, caption)
+                    ExpectInterfaceInterruption(InterruptInterfaceEffect.Bind(
+                        operation, "name", "name", boundary))
+                    fixture.SetCheckboxAccessibleName(control.Win, "WinKey")
+                    CheckWindowsModifierCaption(control.Win)
+                }
                 before := control.Win.Value
                 ExpectInterfaceInterruption(InterruptInterfaceEffect.Bind(
                     fixture.ToggleWindowsModifier.Bind(fixture, control.Win), "toggle", "toggle", boundary))
@@ -308,6 +352,16 @@ CheckInterfaceInterruptions(shortcuts) {
             }
         } finally fixture.CloseDialog()
     }
+}
+
+CheckWindowsModifierCaption(control) {
+    ; Inspect the native control, not source text or an app-owned label. Even
+    ; when the checkbox is wider on another display, it must have no caption
+    ; to leak beside its check mark, and must retain its accessible name.
+    if DllCall("GetWindowTextLengthW", "Ptr", control.Hwnd)
+        throw Error("The Windows-key checkbox can draw stray caption fragments")
+    if UIA.ElementFromHandle(control.Hwnd).Name != "WinKey"
+        throw Error("The captionless Windows-key checkbox lost its accessible name")
 }
 
 CheckKeyCombinationInterface(shortcuts) {
@@ -345,7 +399,7 @@ CheckKeyCombinationInterface(shortcuts) {
     }
     ; Deliver the shell's double-click message to our own script window. This
     ; exercises AHK's default-item dispatch without moving the user's mouse.
-    DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", 0x203)
+    PostTestTrayNotification(0x203)
     deadline := A_TickCount + 1000
     while !shortcuts.Dialog && A_TickCount < deadline
         Sleep(10)
@@ -368,6 +422,7 @@ CheckKeyCombinationInterface(shortcuts) {
             throw Error("Key combination controls are not aligned across rows")
         if control.WindowsIcon.Text != Chr(0xF0FF) || control.WindowsLabel.Text != "WinKey +"
             throw Error("The Windows modifier label is missing")
+        CheckWindowsModifierCaption(control.Win)
         ; Inspect the selected native font and actual glyph coverage, so a
         ; missing-font box cannot satisfy the Windows-logo check.
         dc := DllCall("GetDC", "Ptr", control.WindowsIcon.Hwnd, "Ptr")
@@ -394,7 +449,7 @@ CheckKeyCombinationInterface(shortcuts) {
             control.Win.Value := before
         }
     }
-    DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", 0x203)
+    PostTestTrayNotification(0x203)
     Sleep(30)
     if shortcuts.Dialog.Hwnd != hwnd
         throw Error("A second tray double-click created a duplicate window")

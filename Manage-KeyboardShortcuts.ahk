@@ -217,6 +217,7 @@ class KeyboardShortcutManager {
         this.SingleTap := this.ExpireSingleTap.Bind(this)
         this.Context := this.CanHandleShortcut.Bind(this)
         this.MenuOpen := false, this.MenuFont := 0, this.MenuRows := Map()
+        this.SuppressLeftUp := false
         this.OpenMenu := this.ShowTrayMenu.Bind(this)
         this.OpenSettings := this.ShowSettings.Bind(this)
     }
@@ -532,14 +533,30 @@ class KeyboardShortcutManager {
 
     OnTrayMessage(wParam, lParam, *) {
         event := lParam & 0xFFFF
+        if event = 0x201 {
+            this.SuppressLeftUp := false
+            return
+        }
         if event = 0x203 {
+            this.SuppressLeftUp := true
             SetTimer(this.OpenMenu, 0)
             if this.MenuOpen
                 DllCall("EndMenu")
             SetTimer(this.OpenSettings, -1)
             return 0
         }
-        if event = 0x202 || event = 0x205 || event = 0x7B || event = 0x400 || event = 0x401 {
+        if event = 0x202 {
+            ; The first up precedes a possible double-click. Wait for Windows'
+            ; interval, then consume the final up of a double-click so it cannot
+            ; schedule a stray popup over the settings window. A new down resets
+            ; the flag even when an earlier release occurred outside the icon.
+            suppressed := this.SuppressLeftUp
+            this.SuppressLeftUp := false
+            if !suppressed && !this.MenuOpen
+                SetTimer(this.OpenMenu, -DllCall("GetDoubleClickTime", "UInt"))
+            return 0
+        }
+        if event = 0x205 || event = 0x7B || event = 0x400 || event = 0x401 {
             if !this.MenuOpen
                 SetTimer(this.OpenMenu, -1)
             return 0
@@ -576,9 +593,11 @@ class KeyboardShortcutManager {
         dialog.AddText("w600", "Press a combination in a box. Include Ctrl, Alt or WinKey.`nLeave a box empty to disable that combination.")
         for row in this.InstalledRows() {
             dialog.AddText("xm y+12 w130 h26 +0x200", row.Language)
-            ; Keep a checkbox name for accessibility; its visible label follows
-            ; the Windows symbol. All rows use the same vertical center and x's.
-            winControl := dialog.AddCheckbox("x+10 yp w18 h26", "WinKey")
+            ; A narrow caption can leak letter fragments at another DPI. Draw
+            ; no caption; annotate its accessible name separately. The visible
+            ; label follows the flag, with the same centers and x's in each row.
+            winControl := dialog.AddCheckbox("x+10 yp w18 h26")
+            this.SetCheckboxAccessibleName(winControl, "WinKey")
             winIcon := dialog.AddText("x+2 yp w22 h26 +0x201", Chr(0xF0FF))
             ; Wingdings ships with Windows and supplies its recognizable flag
             ; glyph. Keep the symbol in its own control and font.
@@ -604,6 +623,25 @@ class KeyboardShortcutManager {
     }
 
     ToggleWindowsModifier(control, *) => control.Value := !control.Value
+
+    SetCheckboxAccessibleName(control, name := "") {
+        ; Windows' dynamic annotation keeps the native checkbox usable by
+        ; screen readers without drawing hidden text. This app's x64 runtime
+        ; passes the 16-byte by-value GUID indirectly. An empty name removes
+        ; our annotation before the owned checkbox HWND is destroyed.
+        static service := ComObject("{B5F8350B-0548-48B1-A6EE-88BD00B4A5E7}",
+            "{6E26E776-04F0-495D-80E4-3330352E3169}")
+        static property := Buffer(16, 0)
+        if !NumGet(property, 0, "UInt")
+            DllCall("Ole32\CLSIDFromString", "WStr", "{608D3DF8-8128-4AA7-A428-F55E49267291}",
+                "Ptr", property, "HResult")
+        if name != ""
+            ComCall(7, service, "Ptr", control.Hwnd, "UInt", 0xFFFFFFFC, "UInt", 0,
+                "Ptr", property, "WStr", name)
+        else
+            ComCall(9, service, "Ptr", control.Hwnd, "UInt", 0xFFFFFFFC, "UInt", 0,
+                "Ptr", property, "Int", 1)
+    }
 
     ; The factory keeps native Show interruption checks out of GUI construction.
     CreateSettingsDialog() => Gui(, "Ceratops Keyboard Layout - Key Combinations")
@@ -648,8 +686,11 @@ class KeyboardShortcutManager {
     }
 
     CloseDialog(*) {
-        if this.Dialog
+        if this.Dialog {
+            for name, control in this.Controls
+                this.SetCheckboxAccessibleName(control.Win)
             this.Dialog.Destroy()
+        }
         this.Dialog := 0
         this.ResetTap()
     }

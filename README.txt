@@ -18,7 +18,10 @@ Press a combination in each box, optionally check WinKey + to add the Windows ke
 then Save. Include Ctrl, Alt or Win; leaving a box empty disables that shortcut.
 The compact tray menu shows languages on the left and combinations on the right.
 Combinations align at their first character, including custom combinations.
-The WinKey checkbox uses Windows' recognizable flag symbol. The tray icon has no hover tooltip.
+A single left click waits for Windows' double-click interval; right-click opens immediately.
+The WinKey checkbox uses Windows' recognizable flag symbol. Its screen-reader name
+is separate from the drawing, so display scaling cannot expose clipped label fragments.
+The tray icon has no hover tooltip.
 Small ICO frames crop the original Trixie artwork to fill the Windows tray slot.
 The large ICO frames and PNG keep the original artwork.
 Restore defaults resets the displayed rows. Each combination belongs to one
