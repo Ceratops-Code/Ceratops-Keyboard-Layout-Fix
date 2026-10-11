@@ -5,40 +5,54 @@
 ; screen-reader setting. Runtime text, clipboard backups and maps stay in RAM.
 global IUIAutomationActivateScreenReader := 0
 #Include Lib\UIA.ahk
+#Include Manage-KeyboardShortcuts.ahk
 
 global Converter := KeyboardConverter()
 if A_LineFile = A_ScriptFullPath {
-    A_IconTip := "Ceratops Keyboard Layout: single tap converts selection; double tap converts all"
-    TraySetIcon(A_ScriptDir "\CeratopsKeyboardLayout.ico")
-    ; The portable install has no AutoHotkey helper apps such as Window Spy.
-    A_TrayMenu.Delete()
-    A_TrayMenu.Add("Exit Ceratops Keyboard Layout", (*) => ExitApp())
-    ; Bind the target now: loop variables must not be captured by reference.
-    for name, language in KeyboardConverter.Languages
-        Hotkey("^!" language.Key, HandleConversionShortcut.Bind(name, language.Key))
+    InitializeAppTray(A_ScriptDir "\CeratopsKeyboardLayout.ico")
+    global Shortcuts := KeyboardShortcutManager(Converter)
+    Shortcuts.Start()
     StartAppUpdateCheck()
 }
 
-StartAppUpdateCheck() {
+InitializeAppTray(iconFile, setIcon := TraySetIcon, clearTooltip := HideAppTrayTooltip) {
+    ; Optional callbacks let tests interrupt either native effect in isolation.
+    ; TraySetIcon selects the ICO's small image at Windows' tray dimensions.
+    ; Small ICO frames use a close-up face and keyboard for clearer tray
+    ; visibility. Freeze the same artwork during pause/suspend.
+    setIcon(iconFile, 1, true)
+    clearTooltip()
+    ; Explorer recreates the icon with AHK's default tooltip after a restart.
+    ; Defer clearing until its normal TaskbarCreated handler has added it.
+    static afterExplorerRestart := (*) => SetTimer(HideAppTrayTooltip, -1)
+    OnMessage(DllCall("RegisterWindowMessageW", "Str", "TaskbarCreated", "UInt"), afterExplorerRestart)
+}
+
+HideAppTrayTooltip(*) {
+    ; A_IconTip := "" restores the script name. NIF_TIP with an empty szTip
+    ; actually removes the hover tooltip, without changing clicks or balloons.
+    ; AHK uses its callback message (0x404) as the notification icon ID too.
+    data := Buffer(A_PtrSize = 8 ? 976 : 956, 0)
+    NumPut("UInt", data.Size, data)
+    NumPut("Ptr", A_ScriptHwnd, data, A_PtrSize)
+    NumPut("UInt", 0x404, "UInt", 0x4, data, A_PtrSize * 2)
+    return DllCall("Shell32\Shell_NotifyIconW", "UInt", 1, "Ptr", data, "Int")
+}
+
+StartAppUpdateCheck(manual := false, launch := Run) {
     ; Setup suppresses only its own immediate restart. Future Windows sign-ins
     ; and manual launches check normally. The separate helper cannot block keys.
     for argument in A_Args
-        if argument = "--skip-update-check"
+        if !manual && argument = "--skip-update-check"
             return
-    try Run('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
+    try launch('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
         . ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
-        . A_ScriptDir '\Update-AppInstall.ps1"', A_ScriptDir, "Hide")
-}
-
-; Waiting for the first release prevents key auto-repeat from becoming a
-; double tap. The second physical press must arrive within 350 ms while both
-; modifiers remain down. #MaxThreadsPerHotkey suppresses a second callback
-; while KeyWait observes that press.
-HandleConversionShortcut(target, key, *) {
-    window := WinExist("A")
-    KeyWait(key)
-    doubleTap := KeyWait(key, "D T0.35") && GetKeyState("Ctrl") && GetKeyState("Alt")
-    ConvertFocusedText(target, window, doubleTap ? "all" : "selected")
+        . A_ScriptDir '\Update-AppInstall.ps1"' . (manual ? ' -Manual' : ''), A_ScriptDir, "Hide")
+    catch Error as failure {
+        if manual
+            MsgBox("Could not start the update check.`n`n" failure.Message,
+                "Ceratops Keyboard Layout", "Icon!")
+    }
 }
 
 class KeyboardConverter {
@@ -508,24 +522,6 @@ class RichHtml {
     }
 }
 
-ConvertFocusedText(target, window, behavior) {
-    static processing := false, queue := []
-    queue.Push({target: target, window: window, behavior: behavior})
-    if processing
-        return
-    processing := true
-    try {
-        ; A later hotkey can arrive while an editor is still finishing a paste.
-        ; Preserve its original window and run every request in press order.
-        while queue.Length {
-            request := queue.RemoveAt(1)
-            ConvertOneFocusedText(request.target, request.window, request.behavior)
-        }
-    } finally {
-        processing := false
-    }
-}
-
 ConvertOneFocusedText(target, window, behavior) {
     global Converter
     failureMessage := "", canSwitch := false
@@ -535,13 +531,8 @@ ConvertOneFocusedText(target, window, behavior) {
         ; Reject an unavailable target before asking an editor to select or copy.
         Converter.RequireInstalledLayout(target)
         canSwitch := true
-        ; Avoid sending Ctrl+A/V while the invoking modifiers are still down.
-        keys := ["Ctrl", "Alt"]
-        for name, language in KeyboardConverter.Languages
-            keys.Push(language.Key)
-        for key in keys
-            if !KeyWait(key, "T2")
-                throw Error("Release the shortcut keys, then try again.")
+        ; Ordinary (non-Blind) SendInput releases unnecessary held modifiers
+        ; around Ctrl+A/C/V and restores them. Never wait for physical release.
         if !WinActive("ahk_id " window)
             return
         field := FocusedTextField(window)

@@ -5,8 +5,27 @@ Ctrl+Alt+H converts selected text to Hebrew Standard.
 Ctrl+Alt+R converts selected text to Russian.
 Keep Ctrl+Alt held and tap the same letter twice within 350 ms to select all
 and convert the entire field. Holding a letter is not a double tap. A single
-tap waits briefly for a possible second tap. With no selection, a single tap
+tap waits for a 350 ms double-tap window measured from key-down. With no selection, a single tap
 leaves the text alone and still switches the active keyboard layout.
+The second press of a double tap immediately selects all and converts the
+field instead. Only one conversion runs, so punctuation is not converted
+twice. Neither action waits for key release, even when the keys stay held.
+
+Right-click the green tray icon to see the current combinations for installed
+supported keyboards, the single/double-tap explanation, and Change key combinations...
+Double-clicking the tray icon opens the same Key Combinations window.
+Press a combination in each box, optionally check WinKey + to add the Windows key,
+then Save. Include Ctrl, Alt or Win; leaving a box empty disables that shortcut.
+Languages occupy the left tray-menu column; combinations align in the right column.
+The WinKey checkbox uses Windows' recognizable flag symbol. The tray icon has no hover tooltip.
+Small ICO frames use a broad, front-facing Trixie head and compact keyboard.
+The large ICO frames and PNG keep the original artwork.
+Restore defaults resets the displayed rows. Each combination belongs to one
+language. A combination reserved by an absent language's saved shortcut still
+needs a different assignment. Cancel leaves the current shortcuts unchanged.
+One installation-wide settings file is shared by all accounts. Upgrades keep
+the choices; uninstall removes them. A running app in another session reloads
+shared changes the next time its tray menu opens. No settings watcher is used.
 
 The keys work by physical keyboard position, not by translation or phonetics.
 For example, Hebrew א becomes English t, and Hebrew ד becomes English s.
@@ -65,7 +84,8 @@ The shortcuts do not make an unsupported custom editor compatible: a caret or
 clipboard copy alone cannot prove that Ctrl+A selected its text.
 
 To install on another 64-bit Windows PC, download
-CeratopsKeyboardLayout-Setup.exe from
+CeratopsKeyboardLayout-Setup-<version>.exe (for example,
+CeratopsKeyboardLayout-Setup-1.0.12.exe) from
 https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases
 and run it. The standalone installer includes
 the runtime and dependencies. It asks for administrator approval once and
@@ -84,12 +104,20 @@ Install the Windows keyboard layouts you want to use separately; the
 installer does not add languages or require all supported keyboards.
 
 Updates
+Version 1.0.12 introduces versioned installer filenames. Install it manually
+when upgrading from an earlier release, whose updater expects the previous
+filename. Later automatic updates use versioned installers for both the new
+version and recovery.
 Each start of an installed tray app checks the public GitHub Releases API for
 a newer stable version and asks whether to upgrade. No account is needed.
 Choosing No keeps the current version; the next normal start checks again.
 An offline or unavailable GitHub API does not interrupt the app or show errors.
 Only the registered installed copy checks; unpacked source copies skip it.
 The check sends no text or clipboard content to GitHub.
+Choose Check for updates from the green tray icon's menu to check on demand.
+This reports when Ceratops is up to date with a green check, the check cannot connect, or another
+check is already running. If a newer stable version is available, it asks
+before downloading and uses the same installation and recovery flow below.
 
 Choosing Yes starts a separate Windows PowerShell helper. A normally launched
 tray app requests administrator approval once for installation; an already
@@ -121,6 +149,17 @@ The tray menu omits AutoHotkey tools such as Window Spy, which this portable
 installation does not include.
 
 Storage and lifecycle
+Manage-KeyboardShortcuts.ahk owns
+%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini. Setup creates this data-only
+folder with local-user write access; Program Files remains protected. Settings
+are read at app start and when its tray menu or settings dialog opens. Save
+checks all assignments, stages the new file and atomically replaces the current
+file; a failed save restores the previous live shortcuts. Under an exclusive
+delete-on-close Shortcuts.ini.lock, startup and each save remove an orphaned
+Shortcuts.ini.pending. Successful saves leave only the current INI, with no
+history or logs. Symbolic links/junctions are refused so the elevated app cannot
+write through user-substituted paths. Settings are data, never executable code.
+Uninstall removes these exact settings files and the directory if it is empty.
 The protected Program Files directory owns the scripts, pinned runtime, UIA
 dependency, licenses and icon assets. It contains the current application
 version and, during updates, the protected UpdateCache subdirectory.
@@ -128,14 +167,20 @@ The service starts automatically at Windows boot and owns tray companions for
 active desktop sessions; it stops them when removed. The common Startup
 shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
-The project folder owns CeratopsKeyboardLayout-Setup.iss and a local current
-standalone setup executable. The setup executable is excluded from Git and
+The project folder owns CeratopsKeyboardLayout-Setup.iss and versioned
+standalone setup executables. AppVersion in that script owns their filename,
+Windows file/product version, and release tag. Publisher, description,
+copyright and project/support/update links are installer metadata; a trusted
+code signature is separate. Setup executables are excluded from Git and
 published as a GitHub Release asset. SDLC calls scripts\release-installer.py
 for build, publication and installation. The Inno Setup version is pinned in
 dependencies.json. The helper finds ISCC.exe on PATH or in its standard Windows
 installation directories. It compiles CeratopsKeyboardLayout-Setup.iss into a
 private staging bundle and obtains the checksum-pinned AutoHotkey source ZIP.
-Only successful bundles replace the current setup executable.
+Only successful bundles replace the current version's setup executable.
+Each checkout keeps that installer and at most two predecessors. At startup
+and after activation the helper prunes this versioned output group, removes
+abandoned atomic-copy files, and leaves unrelated files untouched.
 The primary checkout's .build\installer directory owns one lock and at most
 three completed build bundles. Packaging bytes and compiler identity identify
 each bundle; changing only tests or CI does not rebuild an accepted installer.
@@ -154,7 +199,7 @@ The conversion code creates no files or text logs. Maps and clipboard backups
 exist in memory and are released after use/exit.
 Update-AppInstall.ps1 owns UpdateCache beside the installed scripts. Under a
 machine-wide upgrade lock it creates a unique attempt directory for the two
-installers. At helper startup it removes abandoned attempts and retains only
+installers. Before each upgrade it removes abandoned attempts and retains only
 the newest failed-recovery attempt while preparing the new one. On completion
 it deletes downloads and temporary attempts; if recovery fails, it keeps only
 that attempt's previous installer and an error record limited to 8 KiB. Later
@@ -185,8 +230,11 @@ cache junction refusal and busy/abandoned update locks. It substitutes HTTP
 and installer boundaries and never installs software or changes a service.
 Run it with powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
 Tests\Test-AppUpdates.ps1, optionally passing -TempRoot for its private files.
+Use -CasePattern to run only matching check names. Success notices also have
+repeat and interruption cases around opening, closing and reporting their result.
 Tests\Test-KeyConversion.ahk exercises the layout maps, every installed-layout
 subset, live additions/removals, unchanged-cache reuse, failed layout queries,
+shortcut parsing and shared settings, failed-save recovery, tap timing,
 list markers, selected and whole-field conversion, undo, clipboard
 preservation and deselection. The test PC needs all supported layouts to
 exercise real Win32 key output; subset checks simulate missing keyboards.
@@ -194,7 +242,7 @@ Tests\Test-AccessibleConversion.ahk checks selected-text accessibility, rich
 list clipboard conversion, duplicate-marker prevention, unsafe-rich-copy
 refusal, and paste in a background
 test field. Tests\Test-ShortcutKeys.ahk exercises single
-and double global hotkeys, language changes and focused accessibility Ctrl+A
+and double global hotkeys, settings capture, held modifiers, language changes and focused accessibility Ctrl+A
 conversion with toolbar focus recovery and hidden-selection clearing. Run the latter
 only after the installed service has stopped and its tray app has exited;
 another global listener would invalidate the shortcut check.
@@ -203,6 +251,14 @@ Windows desktop for the key-conversion and accessibility checks. Run the
 shortcut test there after the installed service has stopped. Run each test
 with CeratopsKeyboardLayout.exe
 /ErrorStdOut=UTF-8 and the test's script path, and wait for the process to exit.
+Pass a caller-owned task temp root as the shortcut test's first argument; the
+key-conversion suite also accepts that argument for its settings fixture.
+Their private settings files are removed on completion. The default for the
+key-conversion suite is the repository parent's tmp project test directory.
+Windows must be unlocked for accessibility and foreground shortcut checks.
+Pass --ui-only after the shortcut test's temp-root argument to check the Key
+Combinations dialog, tray menu, double-click and interruption behavior without
+registering global shortcuts, sending keyboard input or stopping the service.
 
 Dependencies
 The Ceratops source code and installer script use the MIT license in LICENSE.

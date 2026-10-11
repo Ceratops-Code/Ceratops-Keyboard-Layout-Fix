@@ -32,8 +32,167 @@ class KeyboardLayoutSnapshotFixture extends KeyboardConverter {
     }
 }
 
+; Keep dispatch/binding boundaries in memory for deterministic timing and
+; failed-save checks. Real key-down delivery is covered by Test-ShortcutKeys.
+class ShortcutManagerFixture extends KeyboardShortcutManager {
+    __New(converter, settings) {
+        super.__New(converter, settings)
+        this.BindingChanges := []
+    }
+    ReplaceBindings(values) => this.BindingChanges.Push(values.Clone())
+    ProcessRequests() => this.Processing := false
+}
+
+class ShortcutSettingsFixture extends KeyboardShortcutSettings {
+    Save(values) {
+        if this.HasOwnProp("FailSave") && this.FailSave
+            throw Error("Fixture save failed")
+        super.Save(values)
+    }
+}
+
+AssertError(callback, label) {
+    failed := false
+    try callback.Call()
+    catch Error
+        failed := true
+    Assert(failed, true, label)
+}
+
+ShortcutTestDirectory() {
+    if A_Args.Length
+        return A_Args[1] "\shortcut-settings-" DllCall("GetCurrentProcessId")
+    fullPath := Buffer(65536)
+    DllCall("GetFullPathName", "Str", A_ScriptDir "\..", "UInt", 32768,
+        "Ptr", fullPath, "Ptr", 0)
+    repository := StrGet(fullPath)
+    if !InStr(FileExist(repository "\.git"), "D") {
+        gitDirectory := Trim(SubStr(FileRead(repository "\.git"), 8))
+        repository := RegExReplace(gitDirectory, "[\\/]\.git[\\/]worktrees[\\/][^\\/]+$", "")
+    }
+    SplitPath(repository, &name, &parent)
+    return parent "\tmp\" name "\tests\shortcut-settings-" DllCall("GetCurrentProcessId")
+}
+
 testExitCode := 1
 try {
+    launches := []
+    captureLaunch := (command, directory, display) => launches.Push(
+        {Command: command, Directory: directory, Display: display})
+    StartAppUpdateCheck(false, captureLaunch)
+    StartAppUpdateCheck(true, captureLaunch)
+    Assert(launches.Length, 2, "Startup and tray checks launch the same helper")
+    Assert(InStr(launches[1].Command, " -Manual"), 0, "Startup check stays quiet")
+    Assert(InStr(launches[2].Command, " -Manual") > 0, true, "Tray check requests visible outcomes")
+    Assert(launches[1].Directory, launches[2].Directory, "Both checks use the application directory")
+    Assert(launches[2].Display, "Hide", "Updater has no console window")
+    A_Args.Push("--skip-update-check")
+    try {
+        StartAppUpdateCheck(false, captureLaunch)
+        Assert(launches.Length, 2, "Setup restart skips its automatic check")
+        StartAppUpdateCheck(true, captureLaunch)
+        Assert(launches.Length, 3, "Manual check still works after setup restart")
+    } finally {
+        A_Args.Pop()
+    }
+    ; The same language registry drives defaults, visible rows and persistence.
+    defaults := KeyboardShortcutSettings.Defaults()
+    Assert(defaults.Count, KeyboardConverter.Languages.Count, "One default per supported language")
+    for name, language in KeyboardConverter.Languages {
+        parsed := KeyboardShortcutSettings.Parse(defaults[name])
+        Assert(parsed.Key, language.Key, "Default keeps the physical key")
+        Assert(parsed.Hotkey, "^!" language.Key, "Default Ctrl+Alt binding")
+    }
+    Assert(KeyboardShortcutSettings.Parse("!^e").Hotkey, "^!vk45", "Modifier order and key case")
+    Assert(KeyboardShortcutSettings.Parse("^!e").Label, "Ctrl+Alt+E", "Readable shortcut label")
+    Assert(KeyboardShortcutSettings.Parse("#+F8").Win, true, "Windows modifier is retained")
+    Assert(KeyboardShortcutSettings.Parse("#+F8").Control, "+F8", "Hotkey control excludes Win checkbox")
+    Assert(KeyboardShortcutSettings.Parse("").Label, "Not assigned", "Blank disables a shortcut")
+    Assert(KeyboardShortcutSettings.Parse("^Home").Hotkey
+        != KeyboardShortcutSettings.Parse("^NumpadHome").Hotkey, true, "Numpad navigation stays distinct")
+    for invalid in ["e", "+e", "^", "^!LControl", "^!LButton", "^!Joy1", "^!E up",
+        "~^!e", "^!e & r", "^!{Run}", "#l", "^!Delete"]
+        AssertError(ObjBindMethod(KeyboardShortcutSettings, "Parse", invalid), "Reject unsafe/reserved shortcut " invalid)
+    duplicate := defaults.Clone()
+    duplicate["he"] := duplicate["en"]
+    AssertError(ObjBindMethod(KeyboardShortcutSettings, "CheckAssignments", duplicate), "Duplicate assignments are refused")
+
+    settingsDirectory := ShortcutTestDirectory()
+    DirCreate(settingsDirectory)
+    settings := ShortcutSettingsFixture(settingsDirectory "\Shortcuts.ini")
+    Assert(settings.Load()["en"], defaults["en"], "Missing settings use defaults")
+    chosen := defaults.Clone(), chosen["en"] := "^+F8", chosen["he"] := ""
+    settings.Save(chosen)
+    Assert(settings.Load()["en"], "^+vk77", "Shared settings round trip")
+    Assert(settings.Load()["he"], "", "Disabled language round trip")
+    Assert(FileExist(settings.Path ".pending"), "", "Completed save leaves no pending file")
+    Assert(FileExist(settings.Path ".lock"), "", "Settings lock is deleted on close")
+    FileAppend("orphan", settings.Path ".pending")
+    Assert(settings.Load()["en"], "^+vk77", "Orphan does not replace accepted settings")
+    Assert(FileExist(settings.Path ".pending"), "", "Startup removes orphaned pending file")
+    before := FileRead(settings.Path)
+    AssertError(ObjBindMethod(settings, "Save", duplicate), "Rejected save keeps previous settings")
+    Assert(FileRead(settings.Path), before, "Rejected settings never replace file")
+    FileDelete(settings.Path)
+    FileAppend("[Shortcuts]`nen=^!e & r`n", settings.Path)
+    AssertError(ObjBindMethod(settings, "Load"), "Untrusted configuration is not executable")
+    FileDelete(settings.Path)
+    settings.Save(chosen)
+    lock := settings.AcquireLock()
+    try AssertError(ObjBindMethod(settings, "Save", defaults), "Concurrent save is refused")
+    finally settings.ReleaseLock(lock)
+    Assert(settings.Load()["en"], "^+vk77", "Concurrent failure preserves completed file")
+
+    oneLayout := KeyboardConverter([Converter.Layouts["en"]])
+    manager := ShortcutManagerFixture(oneLayout, settings)
+    manager.Assignments := settings.Load()
+    rows := manager.InstalledRows()
+    Assert(rows.Length, 1, "Only installed languages appear")
+    Assert(rows[1].Name, "en", "Installed language row")
+    Assert(rows[1].Shortcut.Label, "Ctrl+Shift+F8", "Tray row uses saved combination")
+    manager.Converter := KeyboardConverter([])
+    Assert(manager.InstalledRows().Length, 0, "Removed keyboards disappear")
+    manager.Converter := Converter
+    Assert(manager.InstalledRows().Length, Converter.Layouts.Count, "Added keyboards appear without restart")
+    manager.AcceptPress("en", 10, 1000)
+    Assert(manager.Requests.Length, 0, "First key-down starts the decision window")
+    Assert(manager.Pending.Behavior, "selected", "Pending single tap converts selection")
+    manager.AcceptPress("en", 10, 1080)
+    manager.AcceptPress("en", 10, 1200)
+    manager.AcceptPress("en", 11, 1280)
+    manager.ExpireSingleTap()
+    SetTimer(manager.Dispatch, 0)
+    Assert(manager.Requests.Length, 3, "Each double tap queues only one conversion")
+    Assert(manager.Requests[1].Behavior, "all", "Second tap immediately converts all")
+    Assert(manager.Requests[2].Behavior, "selected", "Third tap begins a new pair")
+    Assert(manager.Requests[3].Behavior, "selected", "Different windows do not form a double tap")
+    manager.Requests := []
+    manager.ResetTap()
+    manager.OnPress("en", "vk45")
+    manager.OnPress("en", "vk45")
+    Assert(manager.Requests.Length, 0, "Held-key repeat does not trigger a double tap")
+    Assert(IsObject(manager.Pending), true, "Held-key repeat preserves the pending single tap")
+    manager.OnRelease("vk45")
+    manager.OnPress("en", "vk45")
+    Assert(manager.Requests.Length, 1, "Released key can trigger next tap")
+    Assert(manager.Requests[1].Behavior, "all", "A real second press selects all once")
+    manager.OnRelease("vk45")
+    manager.OnPress("en", "vk45")
+    manager.ExpireSingleTap()
+    Assert(manager.Requests[2].Behavior, "selected", "Single tap expires without a key release")
+    manager.OnPress("en", "vk45")
+    Assert(manager.Requests.Length, 2, "Held key stays suppressed after conversion")
+    settings.FailSave := true
+    oldShortcut := manager.Assignments["en"]
+    AssertError(ObjBindMethod(manager, "Apply", defaults), "Failed save is reported")
+    Assert(manager.Assignments["en"], oldShortcut, "Failed save retains live assignments")
+    Assert(manager.BindingChanges[manager.BindingChanges.Length]["en"], oldShortcut,
+        "Failed save restores previous listener bindings")
+    settings.FailSave := false
+    manager.Apply(defaults)
+    Assert(manager.Assignments["en"], defaults["en"], "Saved assignment becomes live")
+    Assert(settings.Load()["en"], defaults["en"], "Saved assignment survives restart")
+
     for test in [
         ["אד", "en", "ts"], ["שלום", "en", "akuo"],
         ["руддщ", "en", "hello"], ["Руддщ", "en", "Hello"],
@@ -266,5 +425,11 @@ try {
     try FileAppend("FAIL: " failure.Message " (line " failure.Line ")`n", "*")
 } finally {
     try testGui.Destroy()
+    if IsSet(manager)
+        SetTimer(manager.Dispatch, 0)
+    if IsSet(manager)
+        manager.ResetTap()
+    if IsSet(settingsDirectory)
+        try DirDelete(settingsDirectory, true)
 }
 ExitApp(testExitCode)

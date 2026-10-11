@@ -2,12 +2,11 @@
 # recovery. Windows PowerShell 5.1 is sufficient; no account or extra runtime is
 # needed. Dot-source this file to exercise its operations without starting them.
 [CmdletBinding()]
-param([switch]$Apply, [string]$TargetVersion)
+param([switch]$Apply, [string]$TargetVersion, [switch]$Manual)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $script:ReleaseRepository = 'Ceratops-Code/Ceratops-Keyboard-Layout-Fix'
-$script:InstallerAssetName = 'CeratopsKeyboardLayout-Setup.exe'
 $script:MaximumInstallerBytes = 128MB
 
 function ConvertTo-AppVersion {
@@ -90,11 +89,13 @@ function ConvertFrom-InstallerRelease {
     if ($null -ne $ExpectedVersion -and $version -ne $ExpectedVersion) {
         throw 'GitHub returned a different application version.'
     }
-    $assets = @($Release.assets | Where-Object { $_.name -ceq $script:InstallerAssetName })
+    # Bind the filename to the release version for both upgrade and recovery.
+    $installerName = 'CeratopsKeyboardLayout-Setup-{0}.exe' -f (Get-AppVersionText $version)
+    $assets = @($Release.assets | Where-Object { $_.name -ceq $installerName })
     if ($assets.Count -ne 1) { throw 'The release must contain exactly one installer.' }
     $asset = $assets[0]
     $expectedUrl = 'https://github.com/{0}/releases/download/{1}/{2}' -f
-        $script:ReleaseRepository, $Release.tag_name, $script:InstallerAssetName
+        $script:ReleaseRepository, $Release.tag_name, $installerName
     if ($asset.browser_download_url -cne $expectedUrl -or
         $asset.digest -cnotmatch '^sha256:[a-fA-F0-9]{64}$' -or
         $asset.size -le 0 -or $asset.size -gt $script:MaximumInstallerBytes) {
@@ -351,8 +352,70 @@ function Get-UpgradeOutcomeMessage {
     return $message.Trim()
 }
 
+function New-UpdateSuccessDialog {
+    param([string]$Text)
+    # WinForms supplies a DPI-scaled, keyboard-accessible dialog. A green check
+    # belongs only to a successful check, never consent or a failed operation.
+    Add-Type -AssemblyName System.Windows.Forms
+    [Windows.Forms.Application]::EnableVisualStyles()
+    $dialog = [Windows.Forms.Form]::new()
+    $dialog.Text = 'Ceratops Keyboard Layout'
+    $dialog.FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
+    $dialog.StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
+    $dialog.AutoScaleMode = [Windows.Forms.AutoScaleMode]::Font
+    $dialog.Font = [Drawing.SystemFonts]::MessageBoxFont
+    $dialog.AutoSize = $true
+    $dialog.AutoSizeMode = [Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $dialog.MinimumSize = [Drawing.Size]::new(420, 160)
+    $dialog.Padding = [Windows.Forms.Padding]::new(20)
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.TopMost = $true
+    $dialog.ShowIcon = $false
+    $layout = [Windows.Forms.TableLayoutPanel]::new()
+    $layout.AutoSize = $true
+    $layout.ColumnCount = 2
+    $layout.RowCount = 2
+    $layout.Dock = [Windows.Forms.DockStyle]::Fill
+    $mark = [Windows.Forms.Label]::new()
+    $mark.Name = 'SuccessMark'
+    $mark.Text = [string][char]0x2713
+    $mark.AccessibleName = 'Up to date'
+    $mark.ForeColor = [Drawing.Color]::ForestGreen
+    $checkFont = [Drawing.Font]::new('Segoe UI Symbol', 28, [Drawing.FontStyle]::Bold)
+    $mark.Font = $checkFont
+    $mark.AutoSize = $true
+    $mark.Margin = [Windows.Forms.Padding]::new(0, 0, 16, 16)
+    $dialog.add_Disposed({ $checkFont.Dispose() }.GetNewClosure())
+    $message = [Windows.Forms.Label]::new()
+    $message.Name = 'UpdateMessage'
+    $message.Text = $Text
+    $message.AutoSize = $true
+    $message.MaximumSize = [Drawing.Size]::new(480, 0)
+    $message.Margin = [Windows.Forms.Padding]::new(0, 12, 0, 16)
+    $button = [Windows.Forms.Button]::new()
+    $button.Text = 'OK'
+    $button.AutoSize = $true
+    $button.DialogResult = [Windows.Forms.DialogResult]::OK
+    $button.Anchor = [Windows.Forms.AnchorStyles]::Right
+    $layout.Controls.Add($mark, 0, 0)
+    $layout.Controls.Add($message, 1, 0)
+    $layout.Controls.Add($button, 1, 1)
+    $dialog.Controls.Add($layout)
+    $dialog.AcceptButton = $button
+    $dialog.CancelButton = $button
+    return $dialog
+}
+
 function Show-UpdateMessage {
-    param([string]$Text, [switch]$Ask)
+    param([string]$Text, [switch]$Ask, [switch]$Success)
+    if ($Success -and -not $Ask) {
+        $dialog = New-UpdateSuccessDialog $Text
+        try { $null = $dialog.ShowDialog() }
+        finally { $dialog.Dispose() }
+        return $false
+    }
     Add-Type -AssemblyName System.Windows.Forms
     $buttons = if ($Ask) { [Windows.Forms.MessageBoxButtons]::YesNo }
         else { [Windows.Forms.MessageBoxButtons]::OK }
@@ -403,23 +466,41 @@ function Start-UpgradeWorker {
     finally { $process.Dispose() }
 }
 
-function Invoke-StartupUpdateCheck {
+function Invoke-AppUpdateCheck {
     param([string]$InstallDirectory = $PSScriptRoot,
         [hashtable]$Operations = (Get-UpdateOperations),
         [scriptblock]$Prompt = { param($message) Show-UpdateMessage $message -Ask },
-        [scriptblock]$StartUpgrade = { param($version) Start-UpgradeWorker $version })
-    # Offline, GitHub rate limits and unregistered/portable copies are quiet.
+        [scriptblock]$StartUpgrade = { param($version) Start-UpgradeWorker $version },
+        [switch]$Manual,
+        [scriptblock]$Notify = {
+            param($message, [bool]$success = $false)
+            $null = Show-UpdateMessage $message -Success:$success
+        })
+    # Startup stays quiet unless an upgrade is offered. A requested tray check
+    # reports every outcome, but uses the same consent and recovery transaction.
     try {
         $current = & $Operations.ReadVersion $InstallDirectory
-        if ($null -eq $current) { return }
+        if ($null -eq $current) {
+            if ($Manual) { & $Notify 'Run Check for updates from the installed Ceratops application.' }
+            return
+        }
         $release = & $Operations.GetRelease ''
-        if ($release.Version -le $current) { return }
-    } catch { return }
+        if ($release.Version -le $current) {
+            if ($Manual) {
+                & $Notify ('Ceratops Keyboard Layout {0} is up to date.' -f (Get-AppVersionText $current)) $true
+            }
+            return
+        }
+    } catch {
+        if ($Manual) { & $Notify ('Could not check for updates. The current version was not changed.' +
+            [Environment]::NewLine + [Environment]::NewLine + $_.Exception.Message) }
+        return
+    }
     $message = 'Ceratops Keyboard Layout {0} is available (installed: {1}).{2}{2}Upgrade now? Hotkeys pause briefly during installation.' -f
         (Get-AppVersionText $release.Version), (Get-AppVersionText $current), [Environment]::NewLine
     if (& $Prompt $message) {
         try { & $StartUpgrade $release.Version }
-        catch { $null = Show-UpdateMessage 'Upgrade failed. The current version was not changed.' }
+        catch { & $Notify 'Upgrade failed. The current version was not changed.' }
     }
 }
 
@@ -450,9 +531,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         $startupMutex = $null
         try {
             $startupMutex = Enter-UpdateMutex 'Local\CeratopsKeyboardLayoutUpdateCheck'
-            if ($null -ne $startupMutex) { Invoke-StartupUpdateCheck }
+            if ($null -ne $startupMutex) { Invoke-AppUpdateCheck -Manual:$Manual }
+            elseif ($Manual) { $null = Show-UpdateMessage 'An update check is already running.' }
         } catch {
             # A failed background check must never disable keyboard conversion.
+            if ($Manual) { $null = Show-UpdateMessage ('Could not check for updates. ' + $_.Exception.Message) }
         } finally {
             if ($null -ne $startupMutex) { $startupMutex.ReleaseMutex(); $startupMutex.Dispose() }
         }
