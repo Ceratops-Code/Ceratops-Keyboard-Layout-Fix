@@ -11,14 +11,15 @@ The second press of a double tap immediately selects all and converts the
 field instead. Only one conversion runs, so punctuation is not converted
 twice. Neither action waits for key release, even when the keys stay held.
 
-Right-click the green tray icon to see the current combinations for installed
+Left-click or right-click the green tray icon to see the current combinations for installed
 supported keyboards, the single/double-tap explanation, and Change key combinations...
 Double-clicking the tray icon opens the same Key Combinations window.
 Press a combination in each box, optionally check WinKey + to add the Windows key,
 then Save. Include Ctrl, Alt or Win; leaving a box empty disables that shortcut.
-Languages occupy the left tray-menu column; combinations align in the right column.
+The compact tray menu shows languages on the left and combinations on the right.
+Combinations align at their first character, including custom combinations.
 The WinKey checkbox uses Windows' recognizable flag symbol. The tray icon has no hover tooltip.
-Small ICO frames use a broad, front-facing Trixie head and compact keyboard.
+Small ICO frames crop the original Trixie artwork to fill the Windows tray slot.
 The large ICO frames and PNG keep the original artwork.
 Restore defaults resets the displayed rows. Each combination belongs to one
 language. A combination reserved by an absent language's saved shortcut still
