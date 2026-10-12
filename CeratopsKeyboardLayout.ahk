@@ -18,7 +18,7 @@ if A_LineFile = A_ScriptFullPath {
 InitializeAppTray(iconFile, setIcon := TraySetIcon, clearTooltip := HideAppTrayTooltip) {
     ; Optional callbacks let tests interrupt either native effect in isolation.
     ; TraySetIcon selects the ICO's small image at Windows' tray dimensions.
-    ; Every ICO size uses the tightly framed Trixie head from Ceratops assets.
+    ; Every ICO size uses a closer Trixie face crop for visibility on dark trays.
     ; Freeze the same artwork during pause/suspend.
     setIcon(iconFile, 1, true)
     clearTooltip()
