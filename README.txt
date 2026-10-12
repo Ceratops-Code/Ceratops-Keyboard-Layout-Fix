@@ -92,7 +92,12 @@ To install on another 64-bit Windows PC, download
 CeratopsKeyboardLayout-Setup-<version>.exe (for example,
 CeratopsKeyboardLayout-Setup-1.0.12.exe) from
 https://github.com/Ceratops-Code/Ceratops-Keyboard-Layout-Fix/releases
-and run it. The standalone installer includes
+Before running the downloaded installer, check its published release identity:
+
+gh release verify-asset v1.0.12 ./CeratopsKeyboardLayout-Setup-1.0.12.exe --repo Ceratops-Code/Ceratops-Keyboard-Layout-Fix
+
+Use the tag and filename for the version you downloaded. Proceed only when
+the command succeeds. Then run the installer. The standalone installer includes
 the runtime and dependencies. It asks for administrator approval once and
 installs to Program Files\CeratopsKeyboardLayout with a Start Menu entry.
 Before creating its automatic LocalSystem service, setup runs a temporary

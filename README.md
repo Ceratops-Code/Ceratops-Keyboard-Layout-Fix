@@ -11,6 +11,15 @@ Download the standalone Windows installer from
 The installer includes the AutoHotkey runtime and starts Ceratops when you sign
 in. It uses whichever of the supported keyboard layouts are installed in
 Windows; missing Hebrew or Russian keyboards do not prevent it from starting.
+Before running a downloaded installer, check its immutable release attestation
+with GitHub CLI, replacing the tag and filename with the downloaded version:
+
+```powershell
+gh release verify-asset v1.0.12 ./CeratopsKeyboardLayout-Setup-1.0.12.exe --repo Ceratops-Code/Ceratops-Keyboard-Layout-Fix
+```
+
+Proceed only when the command succeeds. This checks release provenance;
+the executable remains unsigned under the signing policy below.
 A shortcut for an unavailable target shows a brief message and leaves the
 text, selection, clipboard, and active keyboard untouched.
 Adding or removing a supported keyboard takes effect on the next conversion
