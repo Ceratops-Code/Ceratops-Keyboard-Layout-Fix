@@ -22,8 +22,9 @@ A single left click waits for Windows' double-click interval; right-click opens 
 The WinKey checkbox uses Windows' recognizable flag symbol. Its screen-reader name
 is separate from the drawing, so display scaling cannot expose clipped label fragments.
 The tray icon has no hover tooltip.
-Small ICO frames crop the original Trixie artwork to fill the Windows tray slot.
-The large ICO frames and PNG keep the original artwork.
+The transparent Trixie head from the Ceratops assets fills every ICO frame,
+with no keyboard or surrounding padding. The PNG, program icon, tray icon,
+and installer use the same artwork.
 Restore defaults resets the displayed rows. Each combination belongs to one
 language. A combination reserved by an absent language's saved shortcut still
 needs a different assignment. Cancel leaves the current shortcuts unchanged.
