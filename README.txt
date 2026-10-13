@@ -22,9 +22,10 @@ A single left click waits for Windows' double-click interval; right-click opens 
 The WinKey checkbox uses Windows' recognizable flag symbol. Its screen-reader name
 is separate from the drawing, so display scaling cannot expose clipped label fragments.
 The tray icon has no hover tooltip.
-The transparent Trixie head from the Ceratops assets fills every ICO frame,
-with no keyboard or surrounding padding. The PNG, program icon, tray icon,
-and installer use the same artwork.
+A closer crop of Trixie's green face fills more of the small icon with visible
+artwork, with no keyboard or surrounding padding. Windows controls the tray's
+physical icon size; increasing the image's resolution alone does not enlarge it.
+The PNG, program icon, tray icon, and installer use the same artwork.
 Restore defaults resets the displayed rows. Each combination belongs to one
 language. A combination reserved by an absent language's saved shortcut still
 needs a different assignment. Cancel leaves the current shortcuts unchanged.
@@ -153,8 +154,7 @@ CeratopsKeyboardLayout.ico. The archive_sha256 in dependencies.json identifies
 the original upstream release archive, before the installed executable's icon
 and display metadata were customized. The executable still runs the
 AutoHotkey engine and retains its upstream license.
-Right-click its Trixie-with-a-keyboard tray icon and choose
-Exit Ceratops Keyboard Layout to stop it.
+Right-click its Trixie tray icon and choose Exit to stop it.
 The tray menu omits AutoHotkey tools such as Window Spy, which this portable
 installation does not include.
 

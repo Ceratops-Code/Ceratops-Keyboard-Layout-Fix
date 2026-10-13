@@ -59,9 +59,11 @@ Press a combination in each box and save. The checkbox before the Windows
 flag and **WinKey +** adds the Windows key; an empty box disables a shortcut.
 The checkbox has no drawn caption; its separate screen-reader name is **WinKey**,
 so changing display scale cannot expose clipped label fragments beside the flag.
-The tray icon has no hover tooltip. The transparent Trixie head from the Ceratops
-assets fills every ICO frame, with no keyboard or surrounding padding. The PNG,
-program icon, tray icon, and installer use the same artwork.
+The tray icon has no hover tooltip. A closer crop of Trixie's green face fills
+more of the small icon with visible artwork, with no keyboard or surrounding
+padding. Windows controls the tray's physical icon size; increasing the image's
+resolution alone does not enlarge it. The PNG, program icon, tray icon, and
+installer use the same artwork.
 Settings are shared by this installation, in
 `%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini`. They survive upgrades and
 are removed on uninstall. Other running sessions reload them when their tray

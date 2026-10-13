@@ -364,7 +364,67 @@ CheckWindowsModifierCaption(control) {
         throw Error("The captionless Windows-key checkbox lost its accessible name")
 }
 
+CheckSmallIconVisibility() {
+    ; Alpha touching each edge missed the small-looking face. Check what Windows
+    ; actually draws on a dark tray at 100%, 150% and 200% display scale instead.
+    ; Both runtime routes must retain enough bright artwork and green face area.
+    for file in [A_ScriptDir "\..\CeratopsKeyboardLayout.ico", A_ScriptDir "\..\CeratopsKeyboardLayout.exe"] {
+        for size in [16, 24, 32] {
+            icon := 0, dc := 0, bitmap := 0, previous := 0
+            try {
+                if SubStr(file, -3) = "ico"
+                    icon := DllCall("LoadImageW", "Ptr", 0, "Str", file, "UInt", 1,
+                        "Int", size, "Int", size, "UInt", 0x10, "Ptr")
+                else {
+                    iconId := 0
+                    if DllCall("PrivateExtractIconsW", "Str", file, "Int", 0,
+                        "Int", size, "Int", size, "Ptr*", &icon, "UInt*", &iconId,
+                        "UInt", 1, "UInt", 0, "UInt") != 1
+                        throw Error("Windows could not extract the program icon")
+                }
+                if !icon
+                    throw OSError()
+                dc := DllCall("Gdi32\CreateCompatibleDC", "Ptr", 0, "Ptr")
+                header := Buffer(40, 0), pixels := 0
+                NumPut("UInt", 40, "Int", size, "Int", -size,
+                    "UShort", 1, "UShort", 32, header)
+                bitmap := DllCall("Gdi32\CreateDIBSection", "Ptr", dc, "Ptr", header,
+                    "UInt", 0, "Ptr*", &pixels, "Ptr", 0, "UInt", 0, "Ptr")
+                if !dc || !bitmap
+                    throw OSError()
+                previous := DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", bitmap, "Ptr")
+                Loop size * size
+                    NumPut("UInt", 0x002B2B2B, pixels, (A_Index - 1) * 4)
+                if !DllCall("DrawIconEx", "Ptr", dc, "Int", 0, "Int", 0, "Ptr", icon,
+                    "Int", size, "Int", size, "UInt", 0, "Ptr", 0, "UInt", 3)
+                    throw OSError()
+                DllCall("Gdi32\GdiFlush")
+                bright := 0, green := 0
+                Loop size * size {
+                    colour := NumGet(pixels, (A_Index - 1) * 4, "UInt")
+                    red := (colour >> 16) & 255, g := (colour >> 8) & 255, blue := colour & 255
+                    bright += Max(red, g, blue) >= 93
+                    green += g >= 90 && g - red >= 10 && g - blue >= 10
+                }
+                if bright < Ceil(size * size * 0.45) || green < Ceil(size * size * 0.35)
+                    throw Error("Trixie's face is too small against the dark tray at " size " pixels: "
+                        bright " bright and " green " green pixels in " file)
+            } finally {
+                if previous
+                    DllCall("Gdi32\SelectObject", "Ptr", dc, "Ptr", previous)
+                if bitmap
+                    DllCall("Gdi32\DeleteObject", "Ptr", bitmap)
+                if dc
+                    DllCall("Gdi32\DeleteDC", "Ptr", dc)
+                if icon
+                    DllCall("DestroyIcon", "Ptr", icon)
+            }
+        }
+    }
+}
+
 CheckKeyCombinationInterface(shortcuts) {
+    CheckSmallIconVisibility()
     InitializeAppTray(A_ScriptDir "\..\CeratopsKeyboardLayout.ico")
     if !HideAppTrayTooltip()
         throw Error("Windows did not accept removal of this test app's tray tooltip")
