@@ -540,6 +540,102 @@ try {
                 finally { $process.Dispose() }
             } finally { $package.Handle.Dispose() }
         }
+        Test-Case 'ordinary relaunch and service takeover' {
+            # Include the production script without running its tray startup. The
+            # workers use the same script path, so its real singleton policy
+            # decides whether the second launch can disturb the first.
+            $repositoryRoot = Split-Path $PSScriptRoot -Parent
+            $runtime = Join-Path $repositoryRoot 'CeratopsKeyboardLayout.exe'
+            $appScript = Join-Path $repositoryRoot 'CeratopsKeyboardLayout.ahk'
+            $probeScript = Join-Path $testRoot '_single-instance-probe.ahk'
+            $ready = Join-Path $testRoot '_single-instance-ready'
+            [IO.File]::WriteAllText($probeScript, (@'
+#Requires AutoHotkey v2.0.19+
+#Include {0}
+FileAppend(DllCall("GetCurrentProcessId", "UInt") "`n", A_Args[1])
+Sleep(30000)
+'@ -f $appScript))
+            $arguments = '/ErrorStdOut=UTF-8 "{0}" "{1}"' -f $probeScript, $ready
+            $serviceArguments = '/script /restart /ErrorStdOut=UTF-8 "{0}" "{1}"' -f $probeScript, $ready
+            $workers = [Collections.Generic.List[Diagnostics.Process]]::new()
+            try {
+                $first = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                $workers.Add($first)
+                $deadline = [Diagnostics.Stopwatch]::StartNew()
+                while ((-not [IO.File]::Exists($ready)) -and $deadline.Elapsed.TotalSeconds -lt 10) {
+                    [Threading.Thread]::Sleep(25)
+                }
+                Assert-Equal ([IO.File]::Exists($ready)) $true 'First companion started'
+                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 1 'First companion reached its body'
+
+                foreach ($attempt in 1..2) {
+                    $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                    $workers.Add($duplicate)
+                    Assert-Equal ($duplicate.WaitForExit(10000)) $true "Duplicate $attempt exited"
+                    $first.Refresh()
+                    Assert-Equal $first.HasExited $false "Duplicate $attempt preserved the first companion"
+                    Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 1 "Duplicate $attempt skipped startup"
+                }
+
+                # The service's /restart launch takes ownership of an ordinary copy.
+                $serviceOutput = Join-Path $testRoot '_service-stdout.txt'
+                $serviceError = Join-Path $testRoot '_service-stderr.txt'
+                $service = Start-Process -FilePath $runtime -ArgumentList $serviceArguments -WindowStyle Hidden -PassThru `
+                    -RedirectStandardOutput $serviceOutput -RedirectStandardError $serviceError
+                $workers.Add($service)
+                Assert-Equal ($first.WaitForExit(10000)) $true 'Service launch replaced the ordinary companion'
+                $deadline.Restart()
+                while ([IO.File]::ReadAllLines($ready).Length -lt 2 -and $deadline.Elapsed.TotalSeconds -lt 10) {
+                    [Threading.Thread]::Sleep(25)
+                }
+                if ([IO.File]::ReadAllLines($ready).Length -ne 2) {
+                    $service.Refresh()
+                    $state = if ($service.HasExited) { "exit $($service.ExitCode)" } else { 'still running' }
+                    $stdout = if ([IO.File]::Exists($serviceOutput)) { [IO.File]::ReadAllText($serviceOutput) } else { '<absent>' }
+                    $stderr = if ([IO.File]::Exists($serviceError)) { [IO.File]::ReadAllText($serviceError) } else { '<absent>' }
+                    throw "Service launch $runtime $serviceArguments reached no body; $state; stdout=$stdout; stderr=$stderr"
+                }
+                $service.Refresh()
+                Assert-Equal $service.HasExited $false 'Service companion remains active'
+                $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                $workers.Add($duplicate)
+                Assert-Equal ($duplicate.WaitForExit(10000)) $true 'Ordinary relaunch exited after service takeover'
+                $service.Refresh()
+                Assert-Equal $service.HasExited $false 'Ordinary relaunch preserved service ownership'
+
+                # Repeated service takeover and a fresh launch after interruption.
+                $nextService = Start-Process -FilePath $runtime -ArgumentList $serviceArguments -WindowStyle Hidden -PassThru
+                $workers.Add($nextService)
+                Assert-Equal ($service.WaitForExit(10000)) $true 'Repeated service launch replaced its predecessor'
+                $deadline.Restart()
+                while ([IO.File]::ReadAllLines($ready).Length -lt 3 -and $deadline.Elapsed.TotalSeconds -lt 10) {
+                    [Threading.Thread]::Sleep(25)
+                }
+                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 3 'Repeated service companion reached its body'
+                $nextService.Kill(); $nextService.WaitForExit()
+                $replacement = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                $workers.Add($replacement)
+                $deadline.Restart()
+                while ([IO.File]::ReadAllLines($ready).Length -lt 4 -and $deadline.Elapsed.TotalSeconds -lt 10) {
+                    [Threading.Thread]::Sleep(25)
+                }
+                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 4 'Fresh companion started after interruption'
+                $replacement.Refresh()
+                Assert-Equal $replacement.HasExited $false 'Fresh companion remains active'
+                $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                $workers.Add($duplicate)
+                Assert-Equal ($duplicate.WaitForExit(10000)) $true 'Fresh companion rejects a repeat launch'
+                $replacement.Refresh()
+                Assert-Equal $replacement.HasExited $false 'Repeat launch preserves fresh companion'
+                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 4 'Repeat launch skipped startup'
+            } finally {
+                foreach ($worker in $workers) {
+                    $worker.Refresh()
+                    if (-not $worker.HasExited) { $worker.Kill(); $worker.WaitForExit() }
+                    $worker.Dispose()
+                }
+            }
+        }
     }
     Write-Output "PASS: $script:Passed update checks"
 } finally {
