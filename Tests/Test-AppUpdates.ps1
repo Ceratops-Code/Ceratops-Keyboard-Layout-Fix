@@ -1,5 +1,5 @@
 # Noninteractive update checks: real release parsing, locked package acceptance,
-# cache ownership and transaction behavior, with HTTP/setup boundaries substituted.
+# cache ownership and upgrade behavior, with HTTP/setup boundaries substituted.
 # No Windows installation, service, GitHub release or user clipboard is changed.
 [CmdletBinding()]
 param([string]$TempRoot, [string]$CasePattern = '.*')
@@ -93,7 +93,7 @@ function New-UpgradeFixture {
         GetRelease = {
             param($version)
             $state.Calls.Add("release:$version")
-            if ($state.Mode -eq 'MissingRollback' -and $version -eq '1.0.10') { throw 'Release missing' }
+            if ($state.Mode -eq 'UnpublishedCurrent' -and $version -eq '1.0.10') { throw 'Current release missing' }
             return [pscustomobject]@{ Version = (& $convertAppVersion $version) }
         }.GetNewClosure()
         GetPackage = {
@@ -113,17 +113,16 @@ function New-UpgradeFixture {
             return & $openCheckedInstaller $path $release
         }.GetNewClosure()
         RunSetup = {
-            param($path, $recovery, $directory)
-            $state.Calls.Add('setup:' + $recovery)
+            param($path, $directory)
+            $state.Calls.Add('setup')
             $state.InstallDirectories.Add($directory)
-            if ($recovery) {
-                if ($state.Mode -eq 'RecoveryFailure') { return 5 }
-                $state.Version = & $convertAppVersion '1.0.10'
-                return 0
-            }
             if ($state.Mode -eq 'SetupThrows') { throw 'Setup process failed to start' }
-            if ($state.Mode -eq 'SetupFailure' -or $state.Mode -eq 'RecoveryFailure') {
+            if ($state.Mode -eq 'SetupFailure') {
                 $state.Version = $null
+                return 5
+            }
+            if ($state.Mode -eq 'PartialInstall') {
+                $state.Version = & $convertAppVersion '1.0.12'
                 return 5
             }
             if ($state.Mode -ne 'WrongVersion') { $state.Version = $state.Target }
@@ -355,39 +354,46 @@ try {
         }
     }
     Test-Case 'preparation failure preserves old installation' {
-        foreach ($mode in @('MissingRollback', 'DownloadFailure', 'BadNewPackage')) {
+        foreach ($mode in @('DownloadFailure', 'BadNewPackage')) {
             $fixture = New-UpgradeFixture
             $fixture.State.Mode = $mode
             Assert-Equal (Invoke-UpgradeFixture $fixture).Status 'Untouched' 'Preparation status'
-            Assert-Equal (@($fixture.State.Calls | Where-Object { $_ -like 'setup:*' }).Count) 0 'No setup started'
+            Assert-Equal (@($fixture.State.Calls | Where-Object { $_ -eq 'setup' }).Count) 0 'No setup started'
             Assert-Equal $fixture.State.Version (ConvertTo-AppVersion '1.0.10') 'Original version'
         }
     }
-    Test-Case 'success prepares recovery before changing anything' {
+    Test-Case 'unpublished current version upgrades without rollback lookup' {
         $fixture = New-UpgradeFixture
+        $fixture.State.Mode = 'UnpublishedCurrent'
         Assert-Equal (Invoke-UpgradeFixture $fixture).Status 'Upgraded' 'Upgrade status'
         Assert-Equal ($fixture.State.Calls -join ',') `
-            'release:1.0.10,release:1.0.11,package:previous.exe,package:upgrade.exe,setup:False' 'Operation order'
+            'release:1.0.11,package:upgrade.exe,setup' 'Operation order'
         Assert-Equal $fixture.State.Version $fixture.State.Target 'Installed version'
+        $calls = $fixture.State.Calls.Count
+        Assert-Equal (Invoke-UpgradeFixture $fixture).Status 'Current' 'Repeated upgrade is current'
+        Assert-Equal $fixture.State.Calls.Count $calls 'Repeated upgrade adds no effects'
     }
-    Test-Case 'installer failure, exception and wrong version recover' {
-        foreach ($mode in @('SetupFailure', 'SetupThrows', 'WrongVersion')) {
+    Test-Case 'installer failure, exception and wrong version report incomplete installation' {
+        foreach ($mode in @('SetupFailure', 'SetupThrows', 'WrongVersion', 'PartialInstall')) {
             $fixture = New-UpgradeFixture
             $fixture.State.Mode = $mode
-            Assert-Equal (Invoke-UpgradeFixture $fixture).Status 'Restored' 'Recovery status'
-            Assert-Equal $fixture.State.Calls[$fixture.State.Calls.Count - 1] 'setup:True' 'Recovery ran'
-            Assert-Equal $fixture.State.Version (ConvertTo-AppVersion '1.0.10') 'Previous version restored'
+            $result = Invoke-UpgradeFixture $fixture
+            Assert-Equal $result.Status 'InstallFailed' 'Post-setup status'
+            Assert-Equal $fixture.State.Calls[$fixture.State.Calls.Count - 1] 'setup' 'Setup ran once'
+            Assert-Equal (@($fixture.State.Calls | Where-Object { $_ -eq 'setup' }).Count) 1 'No rollback setup'
+            Assert-Equal ((Get-UpgradeOutcomeMessage $result).Contains('installation may be incomplete')) `
+                $true 'No unchanged-version claim after setup'
         }
     }
-    Test-Case 'upgrade and recovery retain the current install directory' {
+    Test-Case 'upgrade retains the current install directory' {
         $directory = Join-Path $testRoot 'custom installation'
         foreach ($mode in @('', 'SetupFailure')) {
             $fixture = New-UpgradeFixture
             $fixture.State.Mode = $mode
             $result = Invoke-UpgradeFixture $fixture -InstallDirectory $directory
-            $expected = if ($mode) { 'Restored' } else { 'Upgraded' }
+            $expected = if ($mode) { 'InstallFailed' } else { 'Upgraded' }
             Assert-Equal $result.Status $expected 'Custom installation outcome'
-            Assert-Equal $fixture.State.InstallDirectories.Count (1 + [int][bool]$mode) 'Expected installers ran'
+            Assert-Equal $fixture.State.InstallDirectories.Count 1 'One installer ran'
             foreach ($actual in $fixture.State.InstallDirectories) {
                 Assert-Equal $actual $directory 'Installer retains the registered directory'
             }
@@ -407,13 +413,11 @@ try {
             }
             $directory = Join-Path $testRoot 'custom installation'
             $operations = Get-UpdateOperations
-            foreach ($recovery in @($false, $true)) {
-                Assert-Equal (& $operations.RunSetup 'fixture.exe' $recovery $directory) 0 'Setup exit code'
-                Assert-Equal $script:InstallerInvocation.Path 'fixture.exe' 'Exact installer path'
-                Assert-Equal ($script:InstallerInvocation.Arguments.Contains(' /DIR="' + $directory + '"')) `
-                    $true 'Quoted directory reaches the installer process'
-            }
-            Assert-Fails { Invoke-InstallerProcess 'fixture.exe' $false 'unsafe"directory' }
+            Assert-Equal (& $operations.RunSetup 'fixture.exe' $directory) 0 'Setup exit code'
+            Assert-Equal $script:InstallerInvocation.Path 'fixture.exe' 'Exact installer path'
+            Assert-Equal ($script:InstallerInvocation.Arguments.Contains(' /DIR="' + $directory + '"')) `
+                $true 'Quoted directory reaches the installer process'
+            Assert-Fails { Invoke-InstallerProcess 'fixture.exe' 'unsafe"directory' }
         }
     }
     Test-Case 'concurrent newer install cannot be downgraded' {
@@ -424,38 +428,43 @@ try {
         $fixture = New-UpgradeFixture
         $fixture.State.Mode = 'ConcurrentInstall'
         Assert-Equal (Invoke-UpgradeFixture $fixture).Status 'Untouched' 'Changed baseline stops setup'
-        Assert-Equal (@($fixture.State.Calls | Where-Object { $_ -like 'setup:*' }).Count) 0 'No concurrent overwrite'
+        Assert-Equal (@($fixture.State.Calls | Where-Object { $_ -eq 'setup' }).Count) 0 'No concurrent overwrite'
     }
     Test-Case 'failure notices are explicit' {
-        foreach ($status in @('Untouched', 'Restored', 'RecoveryFailed')) {
-            $result = [pscustomobject]@{ Status = $status; Detail = 'fixture error'; RecoveryPath = 'saved-previous.exe' }
+        foreach ($status in @('Untouched', 'InstallFailed')) {
+            $result = [pscustomobject]@{ Status = $status; Detail = 'fixture error' }
             $message = Get-UpgradeOutcomeMessage $result
             Assert-Equal ($message.StartsWith('Upgrade failed')) $true 'Visible failure notice'
-            if ($status -eq 'RecoveryFailed') {
-                Assert-Equal ($message.Contains('saved-previous.exe')) $true 'Recovery location shown'
+            if ($status -eq 'InstallFailed') {
+                Assert-Equal ($message.Contains('/releases')) $true 'Manual installer location shown'
             }
         }
         Assert-Equal (Get-UpgradeOutcomeMessage ([pscustomobject]@{ Status = 'Upgraded' })) '' 'No false failure notice'
     }
-    Test-Case 'cache retention and recovery failure' {
+    Test-Case 'cache cleanup preserves older manual recovery until success' {
         $cache = Join-Path $testRoot 'cache'
         $foreign = Join-Path $cache 'unrelated'
         $null = [IO.Directory]::CreateDirectory($foreign)
         $orphan = Join-Path $cache ('attempt-' + ('a' * 32))
         $null = [IO.Directory]::CreateDirectory($orphan)
+        [IO.File]::WriteAllText((Join-Path $orphan 'recovery.txt'), 'stale recovery')
+        [IO.File]::WriteAllText((Join-Path $orphan 'previous.exe'), 'older installer')
+        $abandoned = Join-Path $cache ('attempt-' + ('b' * 32))
+        $null = [IO.Directory]::CreateDirectory($abandoned)
         for ($i = 0; $i -lt 3; $i++) {
             $fixture = New-UpgradeFixture
-            $fixture.State.Mode = 'RecoveryFailure'
+            $fixture.State.Mode = 'SetupFailure'
             $result = Invoke-UpgradeFixture $fixture $cache
-            Assert-Equal $result.Status 'RecoveryFailed' 'Honest recovery failure'
-            Assert-Equal ([IO.File]::Exists($result.RecoveryPath)) $true 'Previous installer retained'
-            Assert-Equal (@(Get-ChildItem -LiteralPath $cache -Directory -Filter 'attempt-*').Count) 1 'Bounded recovery attempts'
+            Assert-Equal $result.Status 'InstallFailed' 'Honest setup failure'
+            Assert-Equal (@(Get-ChildItem -LiteralPath $cache -Directory -Filter 'attempt-*').Count) 1 'One older recovery retained'
+            Assert-Equal ([IO.File]::Exists((Join-Path $orphan 'previous.exe'))) $true 'Older installer retained on failure'
         }
-        Assert-Equal ([IO.Directory]::Exists($orphan)) $false 'Abandoned attempt removed'
+        Assert-Equal ([IO.Directory]::Exists($abandoned)) $false 'Abandoned download removed'
         Assert-Equal ([IO.Directory]::Exists($foreign)) $true 'Unrelated directory retained'
         $fixture = New-UpgradeFixture
         Assert-Equal (Invoke-UpgradeFixture $fixture $cache).Status 'Upgraded' 'Later success'
-        Assert-Equal (@(Get-ChildItem -LiteralPath $cache -Directory -Filter 'attempt-*').Count) 0 'Recovery removed after success'
+        Assert-Equal (@(Get-ChildItem -LiteralPath $cache -Directory -Filter 'attempt-*').Count) 0 'Download removed after success'
+        Assert-Equal ([IO.Directory]::Exists($orphan)) $false 'Older recovery removed after success'
     }
     if ($env:OS -eq 'Windows_NT') {
         Test-Case 'successful check dialog has a green check and keyboard dismissal' {

@@ -29,15 +29,16 @@ At startup, installed copies check GitHub for a newer stable release and ask
 before upgrading. **Check for updates** in the tray menu runs the same check
 on demand and reports when the app is up to date, with a green check, or the
 check fails.
-Ceratops stays usable during the check and downloads. The
-updater prepares both installers first and restores the previous version if
-the new installation fails. Both installers retain the registered installation
-folder. Offline startup checks are quiet; portable copies do not
-upgrade the installed app.
+Ceratops stays usable during the check and download. The updater checks the
+new installer's size and SHA-256 digest before running it, without requesting a
+previous release. A download failure leaves the installation unchanged. If
+setup fails after it starts, the installation may be incomplete; run the latest
+published installer manually. Setup retains the registered installation folder.
+Offline startup checks are quiet; portable copies do not upgrade the installed app.
 Installer filenames include their version, such as
 `CeratopsKeyboardLayout-Setup-1.0.12.exe`. Install version 1.0.12 manually when
 upgrading from an earlier release. Earlier updaters expect the unversioned filename.
-Later automatic updates use the versioned filename for both upgrade and recovery.
+Later automatic updates use the versioned filename for the new installer.
 See [the user guide](README.txt) for installation, shortcut behavior,
 editor limitations, and removal.
 
@@ -144,5 +145,6 @@ the same successful build and runs setup silently from an administrator terminal
 Building alone does not publish or install it.
 The [user guide](README.txt) lists the desktop regression checks.
 `Tests/Test-AppUpdates.ps1` checks release selection, consent, download integrity,
-rollback and cache retention without installing software. GitHub CI runs the
-same updater and packaging checks; interactive desktop checks run locally.
+setup failure reporting and cache cleanup without installing software.
+GitHub CI runs the same updater and packaging checks; interactive desktop
+checks run locally.

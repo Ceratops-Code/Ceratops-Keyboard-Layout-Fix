@@ -117,8 +117,7 @@ installer does not add languages or require all supported keyboards.
 Updates
 Version 1.0.12 introduces versioned installer filenames. Install it manually
 when upgrading from an earlier release, whose updater expects the previous
-filename. Later automatic updates use versioned installers for both the new
-version and recovery.
+filename. Later automatic updates use a versioned installer for the new version.
 Each start of an installed tray app checks the public GitHub Releases API for
 a newer stable version and asks whether to upgrade. No account is needed.
 Choosing No keeps the current version; the next normal start checks again.
@@ -128,23 +127,21 @@ The check sends no text or clipboard content to GitHub.
 Choose Check for updates from the green tray icon's menu to check on demand.
 This reports when Ceratops is up to date with a green check, the check cannot connect, or another
 check is already running. If a newer stable version is available, it asks
-before downloading and uses the same installation and recovery flow below.
+before downloading and uses the same installation flow below.
 
 Choosing Yes starts a separate Windows PowerShell helper. A normally launched
 tray app requests administrator approval once for installation; an already
-elevated tray app does not need another prompt. The helper downloads both the
-new installer and the published installer for the currently installed version
-from this repository. Both must match GitHub's SHA-256 digest and byte count
-before installation starts. It holds their accepted files against writes and
-deletion through setup and recovery. If either package cannot be obtained,
-it reports Upgrade failed and leaves the running version untouched.
+elevated tray app does not need another prompt. The helper downloads only the
+new installer from this repository and checks its GitHub SHA-256 digest and byte
+count before installation starts. It holds the accepted file against writes
+and deletion through setup. If the package cannot be obtained, it reports
+Upgrade failed and leaves the running version untouched.
 
 Hotkeys continue working during checks/downloads and pause briefly while setup
-replaces the app and restarts its service or Startup fallback. If new setup
-fails or registers the wrong version, the helper runs the previous installer
-and reports Upgrade failed. If Windows also prevents recovery, it reports that
-separately and gives the saved previous installer's path for manual recovery.
-Automatic recovery cannot guarantee success against disk or Windows failures.
+replaces the app and restarts its service or Startup fallback. If setup fails
+or registers the wrong version, the helper reports that the installation may
+be incomplete and directs you to the latest published installer for manual
+repair. It does not download or run the previous installer.
 Setup's immediate restart skips the update prompt; later starts check normally.
 
 To run the unpacked copy instead, launch CeratopsKeyboardLayout.exe with
@@ -208,15 +205,14 @@ and requires an administrator terminal. Building does not install or publish it.
 The conversion code creates no files or text logs. Maps and clipboard backups
 exist in memory and are released after use/exit.
 Update-AppInstall.ps1 owns UpdateCache beside the installed scripts. Under a
-machine-wide upgrade lock it creates a unique attempt directory for the two
-installers. Before each upgrade it removes abandoned attempts and retains only
-the newest failed-recovery attempt while preparing the new one. On completion
-it deletes downloads and temporary attempts; if recovery fails, it keeps only
-that attempt's previous installer and an error record limited to 8 KiB. Later
-successful installation removes that recovery copy. Uninstall removes the
-owned cache. There are no update history logs. Links and unrelated directories
-are left untouched; cleanup failures are reported instead of hiding the
-installation outcome. A session-wide check lock prevents duplicate prompts.
+machine-wide upgrade lock it creates a unique attempt directory for the new
+installer. Before each upgrade it removes abandoned downloads and keeps at most
+one manual recovery installer saved by an older updater. After each attempt it
+deletes the new download; a successful install also clears the older recovery
+file. Uninstall removes the owned cache. There are no update history logs.
+Links and unrelated directories are left untouched; cleanup failures are
+reported instead of hiding the installation outcome. A session-wide check lock
+prevents duplicate prompts.
 Setup's one-time SYSTEM test task and its XML/result files live in the
 installer's temporary directory and are removed immediately after the test.
 They do not persist across restarts.
@@ -234,7 +230,7 @@ completion. Its default is the repository parent's tmp project test directory.
 Checks
 Tests\Test-AppUpdates.ps1 exercises version ordering, stable release assets,
 upgrade consent, offline checks, checksums, download limits, preparation
-failures, recovery, concurrent installation and bounded cache retention.
+failures, setup failure reporting, concurrent installation and cache cleanup.
 On Windows it also checks file locks, executable launch under a read lock,
 cache junction refusal and busy/abandoned update locks. It substitutes HTTP
 and installer boundaries and never installs software or changes a service.
