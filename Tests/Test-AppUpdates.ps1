@@ -578,14 +578,23 @@ Sleep(30000)
                 }
 
                 # The service's /restart launch takes ownership of an ordinary copy.
-                $service = Start-Process -FilePath $runtime -ArgumentList $serviceArguments -WindowStyle Hidden -PassThru
+                $serviceOutput = Join-Path $testRoot '_service-stdout.txt'
+                $serviceError = Join-Path $testRoot '_service-stderr.txt'
+                $service = Start-Process -FilePath $runtime -ArgumentList $serviceArguments -WindowStyle Hidden -PassThru `
+                    -RedirectStandardOutput $serviceOutput -RedirectStandardError $serviceError
                 $workers.Add($service)
                 Assert-Equal ($first.WaitForExit(10000)) $true 'Service launch replaced the ordinary companion'
                 $deadline.Restart()
                 while ([IO.File]::ReadAllLines($ready).Length -lt 2 -and $deadline.Elapsed.TotalSeconds -lt 10) {
                     [Threading.Thread]::Sleep(25)
                 }
-                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 2 'Service companion reached its body'
+                if ([IO.File]::ReadAllLines($ready).Length -ne 2) {
+                    $service.Refresh()
+                    $state = if ($service.HasExited) { "exit $($service.ExitCode)" } else { 'still running' }
+                    $stdout = if ([IO.File]::Exists($serviceOutput)) { [IO.File]::ReadAllText($serviceOutput) } else { '<absent>' }
+                    $stderr = if ([IO.File]::Exists($serviceError)) { [IO.File]::ReadAllText($serviceError) } else { '<absent>' }
+                    throw "Service launch $runtime $serviceArguments reached no body; $state; stdout=$stdout; stderr=$stderr"
+                }
                 $service.Refresh()
                 Assert-Equal $service.HasExited $false 'Service companion remains active'
                 $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
