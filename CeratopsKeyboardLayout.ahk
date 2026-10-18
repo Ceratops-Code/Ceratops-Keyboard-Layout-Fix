@@ -1,5 +1,5 @@
 #Requires AutoHotkey v2.0.19+
-#SingleInstance Force
+#SingleInstance Ignore
 #MaxThreadsPerHotkey 1
 ; UIA is used only for the focused text field. Do not change Windows' global
 ; screen-reader setting. Runtime text, clipboard backups and maps stay in RAM.
@@ -22,10 +22,43 @@ InitializeAppTray(iconFile, setIcon := TraySetIcon, clearTooltip := HideAppTrayT
     ; Freeze the same artwork during pause/suspend.
     setIcon(iconFile, 1, true)
     clearTooltip()
-    ; Explorer recreates the icon with AHK's default tooltip after a restart.
-    ; Defer clearing until its normal TaskbarCreated handler has added it.
-    static afterExplorerRestart := (*) => SetTimer(HideAppTrayTooltip, -1)
+    ; Explorer can still be starting when the service launches this script.
+    ; AutoHotkey cannot retry a failed initial tray registration on its own.
+    ; Recheck after TaskbarCreated so the restored icon has no tooltip either.
+    static afterExplorerRestart := (*) => SetTimer(CheckAndRestoreAppTrayIcon, -1)
     OnMessage(DllCall("RegisterWindowMessageW", "Str", "TaskbarCreated", "UInt"), afterExplorerRestart)
+    CheckAndRestoreAppTrayIcon()
+}
+
+CheckAndRestoreAppTrayIcon(*) {
+    if RestoreAppTrayIcon()
+        SetTimer(CheckAndRestoreAppTrayIcon, 0)
+    else
+        SetTimer(CheckAndRestoreAppTrayIcon, 1000)
+}
+
+RestoreAppTrayIcon(setHidden := SetAppTrayIconHidden,
+    clearTooltip := HideAppTrayTooltip, iconRegistered := AppTrayIconIsRegistered) {
+    if !iconRegistered() {
+        ; Toggling this built-in variable calls AutoHotkey's icon creation path.
+        setHidden(true)
+        setHidden(false)
+    }
+    return iconRegistered() && clearTooltip()
+}
+
+SetAppTrayIconHidden(hidden) {
+    A_IconHidden := hidden
+}
+
+AppTrayIconIsRegistered() {
+    identifier := Buffer(A_PtrSize = 8 ? 40 : 28, 0)
+    NumPut("UInt", identifier.Size, identifier)
+    NumPut("Ptr", A_ScriptHwnd, identifier, A_PtrSize = 8 ? 8 : 4)
+    NumPut("UInt", 0x404, identifier, A_PtrSize = 8 ? 16 : 8)
+    rectangle := Buffer(16, 0)
+    return DllCall("Shell32\Shell_NotifyIconGetRect", "Ptr", identifier,
+        "Ptr", rectangle, "Int") = 0
 }
 
 HideAppTrayTooltip(*) {

@@ -1,5 +1,5 @@
 # Runs outside the tray process so replacing/stopping Ceratops cannot stop its
-# recovery. Windows PowerShell 5.1 is sufficient; no account or extra runtime is
+# upgrade. Windows PowerShell 5.1 is sufficient; no account or extra runtime is
 # needed. Dot-source this file to exercise its operations without starting them.
 [CmdletBinding()]
 param([switch]$Apply, [string]$TargetVersion, [switch]$Manual)
@@ -89,7 +89,7 @@ function ConvertFrom-InstallerRelease {
     if ($null -ne $ExpectedVersion -and $version -ne $ExpectedVersion) {
         throw 'GitHub returned a different application version.'
     }
-    # Bind the filename to the release version for both upgrade and recovery.
+    # Bind the filename to the target release version.
     $installerName = 'CeratopsKeyboardLayout-Setup-{0}.exe' -f (Get-AppVersionText $version)
     $assets = @($Release.assets | Where-Object { $_.name -ceq $installerName })
     if ($assets.Count -ne 1) { throw 'The release must contain exactly one installer.' }
@@ -141,7 +141,7 @@ function Get-GitHubInstallerRelease {
 function Open-CheckedInstaller {
     param([string]$Path, $Release)
     # Compute the digest after denying writes/deletion, and keep that same handle
-    # until setup (including recovery) finishes. Acceptance cannot race a replace.
+    # until setup finishes. Acceptance cannot race a replace.
     $handle = [IO.File]::Open($Path, [IO.FileMode]::Open,
         [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -212,14 +212,17 @@ function Remove-UpdateAttempts {
     Assert-PlainDirectoryTree $CacheRoot
     foreach ($directory in [IO.Directory]::EnumerateDirectories($CacheRoot)) {
         if ([IO.Path]::GetFileName($directory) -match '^attempt-[a-f0-9]{32}$' -and
-            $directory -ine $KeepPath) { [IO.Directory]::Delete($directory, $true) }
+            $directory -ine $KeepPath) {
+            [IO.Directory]::Delete($directory, $true)
+        }
     }
 }
 
 function New-UpdateAttempt {
     param([string]$CacheRoot)
-    # The caller owns the machine-wide upgrade mutex. Retain at most the newest
-    # recovery attempt while preparing a replacement; ordinary orphans are gone.
+    # The caller owns the machine-wide upgrade mutex. Keep one manual recovery
+    # installer saved by an older updater until a new installation succeeds.
+    # This updater never fetches or runs a previous installer.
     if ([IO.Directory]::Exists($CacheRoot)) {
         Assert-PlainDirectoryTree $CacheRoot
         $recovery = @(Get-ChildItem -LiteralPath $CacheRoot -Directory |
@@ -235,35 +238,34 @@ function New-UpdateAttempt {
 }
 
 function Invoke-InstallerProcess {
-    param([string]$Path, [bool]$Recovery, [string]$InstallDirectory)
+    param([string]$Path, [string]$InstallDirectory)
     if (-not $InstallDirectory -or $InstallDirectory -match '["\r\n]') {
         throw 'The installation directory cannot be passed safely to setup.'
     }
-    $silent = if ($Recovery) { '/VERYSILENT' } else { '/SILENT' }
     # Inno ignores the previous app directory. Pass the registered location to
-    # both installers, quoting spaces and escaping trailing Windows separators.
+    # setup, quoting spaces and escaping trailing Windows separators.
     $directoryArgument = '/DIR="{0}"' -f ($InstallDirectory -replace '(\\+)$', '$1$1')
-    $arguments = "$silent /SUPPRESSMSGBOXES /NORESTART /SP- /CERATOPSUPGRADE=1 $directoryArgument"
+    $arguments = "/SILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CERATOPSUPGRADE=1 $directoryArgument"
     $process = Start-Process -FilePath $Path -ArgumentList $arguments -PassThru
     try { $process.WaitForExit(); return $process.ExitCode }
     finally { $process.Dispose() }
 }
 
 function Get-UpdateOperations {
-    # Substitute these four boundaries in tests; the transaction itself is real.
+    # Substitute these four boundaries in tests; the install sequence itself is real.
     return @{
         ReadVersion = { param($directory) Get-InstalledAppVersion $directory }
         GetRelease = { param($version) Get-GitHubInstallerRelease $version }
         GetPackage = { param($release, $path) Receive-ReleaseInstaller $release $path }
-        RunSetup = { param($path, $recovery, $directory) Invoke-InstallerProcess $path $recovery $directory }
+        RunSetup = { param($path, $directory) Invoke-InstallerProcess $path $directory }
     }
 }
 
 function Invoke-AppUpgrade {
     param([string]$InstallDirectory, [version]$Version, [string]$CacheRoot,
         [hashtable]$Operations)
-    $attempt = $null; $previous = $null; $upgrade = $null
-    $installationStarted = $false; $keepRecovery = $false
+    $attempt = $null; $upgrade = $null
+    $setupAttempted = $false
     $result = $null
     try {
         $current = & $Operations.ReadVersion $InstallDirectory
@@ -273,15 +275,13 @@ function Invoke-AppUpgrade {
             return $result
         }
         $attempt = New-UpdateAttempt $CacheRoot
-        $oldRelease = & $Operations.GetRelease (Get-AppVersionText $current)
         $newRelease = & $Operations.GetRelease (Get-AppVersionText $Version)
-        $previous = & $Operations.GetPackage $oldRelease (Join-Path $attempt 'previous.exe')
         $upgrade = & $Operations.GetPackage $newRelease (Join-Path $attempt 'upgrade.exe')
         if ((& $Operations.ReadVersion $InstallDirectory) -ne $current) {
             throw 'Another installation changed Ceratops while the update was downloading.'
         }
-        $installationStarted = $true
-        $exitCode = & $Operations.RunSetup $upgrade.Path $false $InstallDirectory
+        $setupAttempted = $true
+        $exitCode = & $Operations.RunSetup $upgrade.Path $InstallDirectory
         if ($exitCode -ne 0 -or (& $Operations.ReadVersion $InstallDirectory) -ne $Version) {
             throw "The new installer did not complete successfully (exit $exitCode)."
         }
@@ -289,46 +289,23 @@ function Invoke-AppUpgrade {
         return $result
     } catch {
         $failure = $_.Exception.Message
-        if (-not $installationStarted) {
+        if (-not $setupAttempted) {
             $result = [pscustomobject]@{ Status = 'Untouched'; Detail = $failure }
             return $result
         }
-        try {
-            $exitCode = & $Operations.RunSetup $previous.Path $true $InstallDirectory
-            if ($exitCode -ne 0 -or (& $Operations.ReadVersion $InstallDirectory) -ne $current) {
-                throw "The recovery installer did not complete successfully (exit $exitCode)."
-            }
-            $result = [pscustomobject]@{ Status = 'Restored'; Detail = $failure }
-            return $result
-        } catch {
-            $keepRecovery = $true
-            $detail = "Upgrade failed: $failure`r`nRecovery failed: $($_.Exception.Message)"
-            $result = [pscustomobject]@{
-                Status = 'RecoveryFailed'; Detail = $detail; RecoveryPath = $previous.Path
-            }
-            try {
-                [IO.File]::WriteAllText((Join-Path $attempt 'recovery.txt'),
-                    $detail.Substring(0, [Math]::Min(8192, $detail.Length)))
-            } catch { $result | Add-Member CacheWarning $_.Exception.Message }
-            return $result
-        }
+        # Setup may have stopped the service or replaced files before failing.
+        $result = [pscustomobject]@{ Status = 'InstallFailed'; Detail = $failure }
+        return $result
     } finally {
         if ($null -ne $upgrade) { $upgrade.Handle.Dispose() }
-        if ($null -ne $previous) { $previous.Handle.Dispose() }
         try {
             if ($null -ne $attempt) {
-                if ($keepRecovery) {
-                    if ($null -ne $upgrade) { [IO.File]::Delete($upgrade.Path) }
-                    Remove-UpdateAttempts $CacheRoot $attempt
-                } else {
-                    Assert-PlainDirectoryTree $attempt
-                    [IO.Directory]::Delete($attempt, $true)
-                    if ($installationStarted) { Remove-UpdateAttempts $CacheRoot '' }
-                }
+                Assert-PlainDirectoryTree $attempt
+                [IO.Directory]::Delete($attempt, $true)
+                if ($result.Status -eq 'Upgraded') { Remove-UpdateAttempts $CacheRoot '' }
             }
         } catch {
-            # Housekeeping must not relabel a successful install as a failed
-            # upgrade or erase the location of a surviving recovery installer.
+            # Housekeeping must not relabel a successful install as a failed upgrade.
             if ($null -eq $result) { throw }
             $result | Add-Member CacheWarning $_.Exception.Message -Force
         }
@@ -339,10 +316,9 @@ function Get-UpgradeOutcomeMessage {
     param($Result)
     $message = switch ($Result.Status) {
         'Untouched' { "Upgrade failed. The current version was not changed.`r`n`r`n" + $Result.Detail }
-        'Restored' { 'Upgrade failed. The previous version has been restored and restarted.' }
-        'RecoveryFailed' {
-            "Upgrade failed, and automatic recovery also failed. Run the saved previous installer:`r`n`r`n" +
-                $Result.RecoveryPath + "`r`n`r`n" + $Result.Detail
+        'InstallFailed' {
+            "Upgrade failed during setup. The installation may be incomplete. Run the latest installer manually from https://github.com/$script:ReleaseRepository/releases.`r`n`r`n" +
+                $Result.Detail
         }
         default { '' }
     }
@@ -477,7 +453,7 @@ function Invoke-AppUpdateCheck {
             $null = Show-UpdateMessage $message -Success:$success
         })
     # Startup stays quiet unless an upgrade is offered. A requested tray check
-    # reports every outcome, but uses the same consent and recovery transaction.
+    # reports every outcome, but uses the same consent and installation flow.
     try {
         $current = & $Operations.ReadVersion $InstallDirectory
         if ($null -eq $current) {
