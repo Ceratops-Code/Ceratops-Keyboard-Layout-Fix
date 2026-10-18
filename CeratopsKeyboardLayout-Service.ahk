@@ -464,7 +464,9 @@ LaunchDesktopCompanion(sessionId, suspended := false, requireElevation := false,
 
         executable := A_ScriptDir "\CeratopsKeyboardLayout.exe"
         script := A_ScriptDir "\CeratopsKeyboardLayout.ahk"
-        command := '"' executable '" /script "' script '"'
+        ; Only service launches replace a companion started outside its control.
+        ; Ordinary user launches obey #SingleInstance Ignore in the app script.
+        command := '"' executable '" /script /restart "' script '"'
         if skipUpdateCheck
             command .= " --skip-update-check"
         commandLine := Buffer(StrPut(command, "UTF-16") * 2, 0)
