@@ -27,7 +27,7 @@ jobs:
         run: ./Tests/Test-AppUpdates.ps1 -TempRoot '${{ runner.temp }}/ceratops-update-tests'
       # Interactive AutoHotkey tests run on a Windows desktop before release.
       - name: Validate repository
-        uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@e9a79aacee4c8d7deb6ab9c3b811260bb67be672 # revision ffb3855080cb
+        uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@e9a79aacee4c8d7deb6ab9c3b811260bb67be672 # revision e9a79aacee4c
         with:
           repo-root: ${{ github.workspace }}
           evidence-file: ${{ runner.temp }}/repository-validation.log
