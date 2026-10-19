@@ -296,6 +296,33 @@ ExpectInterfaceInterruption(operation) {
     }
     throw Error("The interface interruption boundary was not exercised")
 }
+InterruptTrayVisibility(selectedEffect, boundary, hidden) {
+    return InterruptInterfaceEffect(SetAppTrayIconHidden, hidden ? "hide" : "show",
+        selectedEffect, boundary, hidden)
+}
+CheckTrayRestorationInterruptions() {
+    ; A missing initial icon leaves AutoHotkey's internal tray handle empty.
+    ; Repeated fresh calls must add it back after each native effect is interrupted.
+    for boundary in ["before", "after"] {
+        for selectedEffect in ["hide", "show", "tooltip"] {
+            SetAppTrayIconHidden(true)
+            if AppTrayIconIsRegistered()
+                throw Error("The tray fixture still has an icon")
+            setHidden := InterruptTrayVisibility.Bind(selectedEffect, boundary)
+            clearTooltip := InterruptInterfaceEffect.Bind(HideAppTrayTooltip,
+                "tooltip", selectedEffect, boundary)
+            ExpectInterfaceInterruption(RestoreAppTrayIcon.Bind(setHidden, clearTooltip))
+            if !RestoreAppTrayIcon() || !AppTrayIconIsRegistered()
+                throw Error("A fresh tray request did not restore the missing icon")
+        }
+    }
+    SetAppTrayIconHidden(true)
+    if RestoreAppTrayIcon(SetAppTrayIconHidden, HideAppTrayTooltip, (*) => false)
+        throw Error("A rejected tray registration was reported as complete")
+    CheckAndRestoreAppTrayIcon()
+    if !AppTrayIconIsRegistered()
+        throw Error("The tray retry did not restore the icon")
+}
 CheckInterfaceInterruptions(shortcuts) {
     ; The only visible settings effect is Show: controls are built in a hidden
     ; window first. Faults surround real Show calls, and fresh calls use the
@@ -352,6 +379,7 @@ CheckInterfaceInterruptions(shortcuts) {
             }
         } finally fixture.CloseDialog()
     }
+    CheckTrayRestorationInterruptions()
 }
 
 CheckWindowsModifierCaption(control) {
