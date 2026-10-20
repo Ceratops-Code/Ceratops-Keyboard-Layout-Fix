@@ -91,6 +91,6 @@ deliverables:
           no-op: Repository tests run separately; the desktop hotkey check runs locally before release.
         install:
           requires:
-            capabilities: [uv, windows]
+            capabilities: [uv, windows, github-cli]
           steps:
             - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install]
