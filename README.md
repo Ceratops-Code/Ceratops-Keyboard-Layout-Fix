@@ -126,9 +126,9 @@ Text conversion runs locally on your computer. Ceratops does not upload your
 text, clipboard contents, or key events to GitHub, SignPath, or the maintainers.
 Key combinations are stored locally in the shared settings path described above.
 
-Installed copies contact GitHub when checking for updates at startup or through
-**Check for updates**. An upgrade downloads installers from GitHub only after
-you agree. GitHub receives ordinary connection/request metadata, including your
+The Windows service contacts GitHub once a day and automatically installs newer
+stable releases. Manual checks through **Check for updates** ask before installing.
+GitHub receives ordinary connection/request metadata, including your
 IP address, the requested release URL, and the
 `CeratopsKeyboardLayout-Updater` user-agent. See
 [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
@@ -155,13 +155,17 @@ Ceratops-Code publisher, copyright, and project/support/update links. These
 details do not replace a trusted code signature.
 Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's
 corresponding GPL source archive. Matching draft uploads resume after interruption;
-published assets are never overwritten. The app's SDLC `install` action requires
-that stable version to be published on GitHub first. Its tag must identify the
-selected source commit, and uploaded asset checksums must match the successful
-build. Only then does setup run silently from an administrator terminal.
+published assets are never overwritten. The app's SDLC `install` action consumes
+the successful build and runs setup silently from an administrator terminal.
+Ceratops owns operation selection and order. Shipping selects package publication
+before local installation; the repository adapter performs each selected effect.
 Building alone does not publish or install it.
 The [user guide](README.txt) lists the desktop regression checks.
+`sdlc/sdlc.yml` is the operation contract. Ceratops executes its named operations;
+`scripts/run-tests.py` owns test selection and result receipts. The repository
+test action runs updater checks in CI and adds the interactive Windows suites
+locally. The installer package test action runs the existing Python cases through
+pytest. CI invokes the same SDLC test actions through the pinned Ceratops action.
+Python tooling uses the locked Python 3.14 environment under `scripts`.
 `Tests/Test-AppUpdates.ps1` checks release selection, consent, download integrity,
 setup failure reporting and cache cleanup without installing software.
-GitHub CI runs the same updater and packaging checks; interactive desktop
-checks run locally.

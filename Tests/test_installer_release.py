@@ -24,12 +24,25 @@ import unittest
 from typing import Any
 from unittest import mock
 
+import pytest
+
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("installer_release", REPOSITORY / "scripts" / "release-installer.py")
 assert SPEC is not None and SPEC.loader is not None
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
+RUNNER_SPEC = importlib.util.spec_from_file_location("test_runner", REPOSITORY / "scripts" / "run-tests.py")
+assert RUNNER_SPEC is not None and RUNNER_SPEC.loader is not None
+runner = importlib.util.module_from_spec(RUNNER_SPEC)
+RUNNER_SPEC.loader.exec_module(runner)
 TASK_TEMP_ROOT: pathlib.Path
+
+
+@pytest.fixture(scope="module", autouse=True)
+def use_test_temp_root(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Let pytest own bounded scratch while preserving unittest's direct entry."""
+    global TASK_TEMP_ROOT
+    TASK_TEMP_ROOT = tmp_path_factory.mktemp("installer-cases")
 
 
 class BuildTests(unittest.TestCase):
@@ -81,21 +94,11 @@ class BuildTests(unittest.TestCase):
     def compiler_calls(self) -> list[Any]:
         return [call for call in self.command.call_args_list if call.args[0][0] == str(self.compiler)]
 
-    def published_github(self, record: dict[str, Any]) -> FakeGitHub:
-        github = FakeGitHub(self.root, record)
-        github.tag_commit = github.commit
-        github.release = {
-            "id": 1, "tag_name": f"v{record['version']}", "target_commitish": github.commit,
-            "draft": False, "prerelease": False, "published_at": "2026-10-21T00:00:00Z",
-            "assets": [github.asset(name) for name in record["artifacts"]],
-        }
-        return github
-
-    def install(self, github: FakeGitHub) -> int:
-        with mock.patch.object(release, "source_commit", return_value=github.commit), \
+    def install(self) -> int:
+        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
              mock.patch.object(release, "build_store", return_value=self.store), \
              mock.patch.object(release, "compiler_path", return_value=self.compiler), \
-             mock.patch.object(release.subprocess, "run", side_effect=github.api_command), \
+             mock.patch.object(release.subprocess, "run", side_effect=AssertionError("Installation must not contact GitHub.")), \
              mock.patch.object(sys, "argv", ["release-installer.py", "install", "--repo-root", str(self.root)]), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return release.main()
@@ -294,47 +297,14 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(self.compiler_calls(), [])
 
     def test_installation_consumes_completed_build_without_recompilation(self) -> None:
-        _, record = self.build()
-        self.assertEqual(self.install(self.published_github(record)), 0)
+        self.build()
+        self.assertEqual(self.install(), 0)
         self.assertEqual(len(self.compiler_calls()), 1)
         self.assertEqual(self.command.call_args.args[0][0], str(self.root / self.setup_name))
+        self.assertFalse(any(call.args[0][0] == "gh" for call in self.command.call_args_list))
 
-    def test_unpublished_or_incomplete_github_release_blocks_setup(self) -> None:
-        _, record = self.build()
-        for condition in ("missing", "draft", "prerelease", "unpublished", "wrong-tag", "wrong-commit", "missing-asset", "wrong-asset"):
-            with self.subTest(condition=condition):
-                github = self.published_github(record)
-                assert github.release is not None
-                if condition == "missing":
-                    github.release = None
-                elif condition == "draft":
-                    github.release["draft"] = True
-                elif condition == "prerelease":
-                    github.release["prerelease"] = True
-                elif condition == "unpublished":
-                    github.release["published_at"] = None
-                elif condition == "wrong-tag":
-                    github.release["tag_name"] = "v9.9.9"
-                elif condition == "wrong-commit":
-                    github.tag_commit = "b" * 40
-                elif condition == "missing-asset":
-                    github.release["assets"].pop()
-                else:
-                    github.release["assets"][0]["digest"] = "sha256:other"
-                self.assertEqual(self.install(github), 1)
-                self.assertEqual(self.installer_calls(), [])
-                self.assertEqual((github.creations, github.publications, github.uploads), (0, 0, []))
-
-    def test_github_read_failure_blocks_setup(self) -> None:
-        _, record = self.build()
-        github = self.published_github(record)
-        with mock.patch.object(github, "request", side_effect=OSError("GitHub unavailable")):
-            self.assertEqual(self.install(github), 1)
-        self.assertEqual(self.installer_calls(), [])
-
-    def test_repeated_installation_and_interruption_use_the_published_build(self) -> None:
-        _, record = self.build()
-        github = self.published_github(record)
+    def test_repeated_installation_and_interruption_use_the_completed_build(self) -> None:
+        self.build()
 
         def check_interrupted_install(boundary: str) -> None:
             target: list[bytes] = []
@@ -350,18 +320,18 @@ class BuildTests(unittest.TestCase):
                 return self.compile(argv, root, **kwargs)
 
             self.command.side_effect = install_effect
-            self.assertEqual(self.install(github), 1)
+            self.assertEqual(self.install(), 1)
             self.assertEqual(target, [] if boundary == "before" else [b"standalone installer"])
             interrupt = False
-            self.assertEqual(self.install(github), 0)
-            self.assertEqual(self.install(github), 0)
+            self.assertEqual(self.install(), 0)
+            self.assertEqual(self.install(), 0)
             self.assertEqual(target, [b"standalone installer"])
 
         for boundary in ("before", "after"):
             with self.subTest(boundary=boundary):
                 check_interrupted_install(boundary)
         self.assertEqual(len(self.compiler_calls()), 1)
-        self.assertEqual((github.creations, github.publications, github.uploads), (0, 0, []))
+        self.assertFalse(any(call.args[0][0] == "gh" for call in self.command.call_args_list))
 
     def test_unreadable_snapshot_fails_cleanly_without_an_installer(self) -> None:
         def unreadable_archive(argv: list[str], root: pathlib.Path) -> subprocess.CompletedProcess[bytes]:
@@ -522,6 +492,167 @@ class PublishTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "Multiple releases"):
             self.publish()
         self.assertEqual(self.github.creations, 0)
+
+
+class TestRunnerTests(unittest.TestCase):
+    """Exercise the normal runner entrypoint without executing desktop effects."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="runner-check-", dir=TASK_TEMP_ROOT)
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
+        self.enterContext(mock.patch.object(runner, "task_temp_root", return_value=self.root / "scratch"))
+        self.enterContext(mock.patch.object(runner.platform, "system", return_value="Windows"))
+        self.enterContext(mock.patch.object(runner.shutil, "which", return_value="pwsh"))
+        self.enterContext(mock.patch.dict(os.environ, {"CI": "", "PYTEST_ADDOPTS": ""}))
+        self.command = self.enterContext(mock.patch.object(runner.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, "", "")))
+
+    def run_runner(self, arguments: list[str] | None = None) -> int:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = runner.main(arguments or [])
+        self.stdout, self.stderr = stdout.getvalue(), stderr.getvalue()
+        return code
+
+    def receipt_arguments(self, identity: str) -> list[str]:
+        return ["--result-file", str(self.root / f"{identity}.json"), "--result-id", identity,
+                "--candidate-id", "candidate", "--check-id", "repository", "--check-version", "runner"]
+
+    def read_receipt(self, identity: str) -> dict[str, Any]:
+        return json.loads((self.root / f"{identity}.json").read_text(encoding="utf-8"))
+
+    def test_local_desktop_and_ci_have_distinct_recorded_scope(self) -> None:
+        self.assertEqual(self.run_runner(self.receipt_arguments("desktop")), 0)
+        self.assertEqual(self.command.call_count, 4)
+        desktop = self.read_receipt("desktop")
+        self.assertEqual(desktop["invocation"]["profile"], "desktop")
+        self.assertEqual([item["name"] for item in desktop["checks"]],
+                         ["updater", "key-conversion", "shortcut-dispatch", "accessible-conversion"])
+        self.assertTrue(all(item["status"] == "passed" for item in desktop["checks"]))
+        self.command.reset_mock()
+        with mock.patch.dict(os.environ, {"CI": "true"}), \
+             mock.patch.object(runner.platform, "system", return_value="Linux"):
+            self.assertEqual(self.run_runner(self.receipt_arguments("ci")), 0)
+        self.assertEqual(self.command.call_count, 1)
+        self.assertEqual(self.command.call_args.args[0][0], "pwsh")
+        ci = self.read_receipt("ci")
+        self.assertEqual(ci["invocation"]["profile"], "ci")
+        self.assertEqual(ci["checks"][-1]["status"], "not_applicable")
+
+    def test_ci_acceptance_cannot_replace_desktop_tests(self) -> None:
+        arguments = self.receipt_arguments("ci")
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            self.assertEqual(self.run_runner(arguments), 0)
+        original = (self.root / "ci.json").read_bytes()
+        self.command.reset_mock()
+        self.assertEqual(self.run_runner(arguments), 2)
+        self.assertEqual(self.command.call_count, 0)
+        self.assertEqual((self.root / "ci.json").read_bytes(), original)
+
+    def test_repeated_accepted_runner_call_does_not_repeat_child_effects(self) -> None:
+        arguments = self.receipt_arguments("accepted")
+        self.assertEqual(self.run_runner(arguments), 0)
+        original = (self.root / "accepted.json").read_bytes()
+        self.assertEqual(self.run_runner(arguments), 0)
+        self.assertEqual(self.command.call_count, 4)
+        self.assertEqual((self.root / "accepted.json").read_bytes(), original)
+
+    def test_each_child_failure_stops_later_suites_and_keeps_both_streams(self) -> None:
+        def check_failure(stage: int) -> None:
+            self.command.reset_mock()
+            self.command.side_effect = [subprocess.CompletedProcess([], 0, "", "")] * stage + [
+                subprocess.CompletedProcess([], 7, "child output", "child error")]
+            self.assertEqual(self.run_runner(), 7)
+            self.assertEqual(self.command.call_count, stage + 1)
+            command = self.command.call_args.args[0]
+            self.assertIn("Command: " + json.dumps(command), self.stderr)
+            self.assertIn("Exit status: 7", self.stderr)
+            self.assertIn("stdout:\nchild output", self.stderr)
+            self.assertIn("stderr:\nchild error", self.stderr)
+
+        for stage in range(4):
+            with self.subTest(stage=stage):
+                check_failure(stage)
+
+    def test_interrupted_child_boundaries_require_a_fresh_normal_call(self) -> None:
+        def check_interruption(stage: int, boundary: str) -> None:
+            effects: list[list[str]] = []
+            interrupt = True
+
+            def effect(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                if interrupt and len(effects) == stage and boundary == "before":
+                    raise KeyboardInterrupt
+                effects.append(command)
+                if interrupt and len(effects) == stage + 1 and boundary == "after":
+                    raise KeyboardInterrupt
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            self.command.side_effect = effect
+            identity = f"interrupted-{stage}-{boundary}"
+            arguments = self.receipt_arguments(identity)
+            self.assertEqual(self.run_runner(arguments), 130)
+            self.assertEqual(len(effects), stage + (boundary == "after"))
+            self.assertEqual(self.read_receipt(identity)["status"], "interrupted")
+            original = (self.root / f"{identity}.json").read_bytes()
+            self.assertEqual(self.run_runner(arguments), 2)
+            interrupt = False
+            fresh = self.receipt_arguments(f"fresh-{stage}-{boundary}")
+            before = len(effects)
+            self.assertEqual(self.run_runner(fresh), 0)
+            self.assertEqual(len(effects), before + 4)
+            self.assertEqual(self.run_runner(fresh), 0)
+            self.assertEqual(len(effects), before + 4)
+            self.assertEqual((self.root / f"{identity}.json").read_bytes(), original)
+
+        for stage in range(4):
+            for boundary in ("before", "after"):
+                with self.subTest(stage=stage, boundary=boundary):
+                    check_interruption(stage, boundary)
+
+    def test_missing_powershell_blocks_before_child_effects(self) -> None:
+        with mock.patch.object(runner.shutil, "which", return_value=None):
+            self.assertEqual(self.run_runner(), 2)
+        self.assertIn("PowerShell Core", self.stderr)
+        self.assertEqual(self.command.call_count, 0)
+
+    def test_non_windows_local_repository_run_cannot_skip_desktop_tests(self) -> None:
+        with mock.patch.object(runner.platform, "system", return_value="Linux"):
+            self.assertEqual(self.run_runner(), 2)
+        self.assertIn("signed-in Windows desktop", self.stderr)
+        self.assertEqual(self.command.call_count, 0)
+
+    def test_installer_uses_current_python_and_keeps_scratch_in_its_scope(self) -> None:
+        with mock.patch.dict(os.environ, {"PYTEST_ADDOPTS": "--basetemp=unsafe -q"}):
+            self.assertEqual(self.run_runner(["--suite", "installer", "--pytest-arg=--basetemp=unsafe"]), 0)
+        command = self.command.call_args.args[0]
+        environment = self.command.call_args.kwargs["env"]
+        self.assertEqual(command[:3], [sys.executable, "-m", "pytest"])
+        self.assertFalse(any("basetemp" in argument for argument in command))
+        self.assertEqual(environment["PYTEST_ADDOPTS"], "-q")
+        self.assertEqual(environment["PYTEST_DEBUG_TEMPROOT"], str(self.root / "scratch"))
+        self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
+        self.assertNotIn(runner.CHECK_CONTEXT_ENV, environment)
+
+    def test_child_launch_error_retains_runtime_and_absent_output(self) -> None:
+        self.command.side_effect = FileNotFoundError("missing executable")
+        self.assertEqual(self.run_runner(), 127)
+        self.assertIn('"pwsh"', self.stderr)
+        self.assertIn("stdout:\n<absent>", self.stderr)
+        self.assertIn("FileNotFoundError: missing executable", self.stderr)
+
+    def test_shared_probe_protocol_keeps_canonical_acceptance_and_reuses_it(self) -> None:
+        command = [sys.executable, "-c", "pass"]
+        arguments = self.receipt_arguments("probe") + ["--probe-command", json.dumps(command)]
+        self.assertEqual(self.run_runner(arguments), 0)
+        receipt = self.read_receipt("probe")
+        self.assertEqual(set(receipt), {"schema", "result_id", "candidate_id", "check_id",
+                                       "check_version", "invocation", "status", "exit_code"})
+        self.assertEqual(receipt["invocation"], {"targets": [], "pytest_args": [],
+                                               "pytest_addopts": [], "probe_command": command})
+        self.assertEqual(self.command.call_args.args[0], command)
+        self.assertEqual(self.run_runner(arguments), 0)
+        self.assertEqual(self.command.call_count, 1)
 
 
 class GitHubResponseTests(unittest.TestCase):

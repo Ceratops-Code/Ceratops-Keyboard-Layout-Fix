@@ -20,18 +20,13 @@ jobs:
           node-version: "24"
       - name: Install npm validation dependencies
         run: npm --prefix scripts ci
-      - name: Test installer release workflow
-        run: uv run --project scripts --locked python Tests/test_installer_release.py
-      - name: Test updater without installing software
-        shell: pwsh
-        run: ./Tests/Test-AppUpdates.ps1 -TempRoot '${{ runner.temp }}/ceratops-update-tests'
       # Interactive AutoHotkey tests run on a Windows desktop before release.
-      - name: Validate repository
+      - name: Run SDLC repository checks and tests
         uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@e9a79aacee4c8d7deb6ab9c3b811260bb67be672 # revision e9a79aacee4c
         with:
           repo-root: ${{ github.workspace }}
           evidence-file: ${{ runner.temp }}/repository-validation.log
-          run-tests: "false"
+          run-tests: "true"
 
       - name: Upload validation evidence
         if: failure()

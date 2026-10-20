@@ -6,13 +6,17 @@ repository:
       executable: uv
     windows:
       executable: powershell
-      platforms: [windows]
+      platforms:
+        - windows
+    powershell-core:
+      executable: pwsh
     inno-setup:
       executable: ISCC.exe
       version-from:
         file: dependencies.json
         key: InnoSetup
-      platforms: [windows]
+      platforms:
+        - windows
     github-cli:
       executable: gh
   actions:
@@ -35,21 +39,19 @@ repository:
         - run:
             - uv
             - run
-            - --project
-            - scripts
             - --locked
-            - python
             - scripts/validate-repository.py
     test:
       requires:
-        capabilities: [uv, windows]
+        capabilities:
+          - uv
+          - powershell-core
       steps:
-        - run: [uv, run, --project, scripts, --locked, python, -c, "import os, sys; sys.exit('Desktop tests require a signed-in Windows session, not CI.' if os.getenv('CI') else 0)"]
-        - run: [powershell, -NoProfile, -NonInteractive, -ExecutionPolicy, Bypass, -File, Tests/Test-AppUpdates.ps1]
-        - run: [./CeratopsKeyboardLayout.exe, /ErrorStdOut=UTF-8, Tests/Test-KeyConversion.ahk]
-        - run: [./CeratopsKeyboardLayout.exe, /ErrorStdOut=UTF-8, Tests/Test-ShortcutKeys.ahk, --dispatch-only]
-        - run: [./CeratopsKeyboardLayout.exe, /ErrorStdOut=UTF-8, Tests/Test-AccessibleConversion.ahk]
-
+        - run:
+            - uv
+            - run
+            - --locked
+            - scripts/run-tests.py
 deliverables:
   packages:
     ceratops-keyboard-layout-installer:
@@ -62,35 +64,79 @@ deliverables:
       actions:
         test:
           requires:
-            capabilities: [uv]
+            capabilities:
+              - uv
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, Tests/test_installer_release.py]
+            - run:
+                - uv
+                - run
+                - --locked
+                - scripts/run-tests.py
+                - --suite
+                - installer
         build:
           requires:
-            capabilities: [uv, windows, inno-setup]
+            capabilities:
+              - uv
+              - windows
+              - inno-setup
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build]
+            - run:
+                - uv
+                - run
+                - --project
+                - scripts
+                - --locked
+                - python
+                - scripts/release-installer.py
+                - build
         publish:
           requires:
-            capabilities: [uv, windows, inno-setup, github-cli]
+            capabilities:
+              - uv
+              - windows
+              - inno-setup
+              - github-cli
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish]
+            - run:
+                - uv
+                - run
+                - --project
+                - scripts
+                - --locked
+                - python
+                - scripts/release-installer.py
+                - publish
   apps:
     ceratops-keyboard-layout:
       source: .
       manifest: CeratopsKeyboardLayout-Setup.iss
-      prerequisites: [ceratops-keyboard-layout-installer]
+      prerequisites:
+        - ceratops-keyboard-layout-installer
       actions:
         validate:
           requires:
             capabilities: []
-          no-op: Repository validation runs separately; no app-only validation is declared.
+          no-op: Repository validation runs separately; no app-only validation is
+            declared.
         test:
           requires:
             capabilities: []
-          no-op: Repository tests run separately; the desktop hotkey check runs locally before release.
+          no-op: Repository tests run separately; the desktop hotkey check runs locally
+            before release.
         install:
           requires:
-            capabilities: [uv, windows, github-cli]
+            capabilities:
+              - uv
+              - windows
+              - inno-setup
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install]
+            - run:
+                - uv
+                - run
+                - --project
+                - scripts
+                - --locked
+                - python
+                - scripts/release-installer.py
+                - install
