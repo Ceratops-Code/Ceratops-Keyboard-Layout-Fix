@@ -181,9 +181,13 @@ CheckPhysicalTrayHover(root) {
         for tooltip in tooltipWindows {
             if !DllCall("IsWindowVisible", "Ptr", tooltip)
                 continue
+            ; Windows retains an empty XAML host after its tooltip disappears.
+            if WinGetClass("ahk_id " tooltip) = "Xaml_WindowedPopupClass"
+                && !UIA.ElementFromHandle(tooltip).ElementExist({Type: "ToolTip", IsOffscreen: false})
+                continue
             WinGetPos(&tx, &ty, &tw, &th, "ahk_id " tooltip)
             if Abs(tx - x) < 180 && Abs(ty - y) < 180
-                throw Error("A visible tooltip appeared while hovering over the candidate icon")
+                throw Error("Hover popup class=" WinGetClass("ahk_id " tooltip) "`n" UIA.ElementFromHandle(tooltip).DumpAll(" ", 4))
         }
     } finally {
         A_IconHidden := true
