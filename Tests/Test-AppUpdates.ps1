@@ -139,6 +139,35 @@ function Invoke-UpgradeFixture {
 }
 
 try {
+    Test-Case 'automatic checks upgrade newer stable releases without prompts' {
+        foreach ($mode in @('Portable', 'Offline', 'Current', 'Older', 'Newer', 'UpgradeFailure')) {
+            $state = [pscustomobject]@{ Mode = $mode; Prompts = 0; Notices = 0; Upgrades = 0; Requests = 0 }
+            $operations = @{
+                ReadVersion = { param($directory)
+                    if ($state.Mode -eq 'Portable') { return $null }
+                    return [version]'1.0.21.0'
+                }.GetNewClosure()
+                GetRelease = { param($version)
+                    $state.Requests++
+                    if ($state.Mode -eq 'Offline') { throw 'offline' }
+                    $value = switch ($state.Mode) { 'Current' { '1.0.21.0' }; 'Older' { '1.0.20.0' }; default { '1.0.22.0' } }
+                    return [pscustomobject]@{ Version = [version]$value }
+                }.GetNewClosure()
+            }
+            $prompt = { param($message) $state.Prompts++; return $true }.GetNewClosure()
+            $notify = { param($message, $success) $state.Notices++ }.GetNewClosure()
+            $upgrade = { param($version)
+                $state.Upgrades++
+                if ($version -ne [version]'1.0.22.0') { throw 'Wrong automatic target.' }
+                if ($state.Mode -eq 'UpgradeFailure') { throw 'Upgrade failed.' }
+            }.GetNewClosure()
+            Invoke-AppUpdateCheck -Automatic -Operations $operations -Prompt $prompt -Notify $notify -StartUpgrade $upgrade
+            Assert-Equal $state.Prompts 0 'Automatic updates never ask for consent'
+            Assert-Equal $state.Notices 0 'A SYSTEM worker never opens a dialog'
+            Assert-Equal $state.Upgrades ([int]($mode -in @('Newer', 'UpgradeFailure'))) 'Only a newer stable release starts setup'
+            if ($mode -eq 'Portable') { Assert-Equal $state.Requests 0 'An unpacked worker cannot upgrade the installed app' }
+        }
+    }
     Test-Case 'numeric versions' {
         Assert-Equal ((ConvertTo-AppVersion 'v1.0.10') -gt (ConvertTo-AppVersion '1.0.9')) $true 'Numeric ordering'
         Assert-Equal (ConvertTo-AppVersion '1.0.11') (ConvertTo-AppVersion '1.0.11.0') 'Equivalent versions'
@@ -535,6 +564,80 @@ try {
                 if ($null -ne $observer) { $observer.Dispose() }
             }
         }
+        Test-Case 'updater log writer outcomes and interrupted effects' {
+            $directory = Join-Path $testRoot '_log-writer'
+            $null = [IO.Directory]::CreateDirectory($directory)
+            $runtime = Join-Path $directory 'CeratopsKeyboardLayout.exe'
+            $original = Join-Path (Split-Path $PSScriptRoot -Parent) 'CeratopsKeyboardLayout.exe'
+            [IO.File]::Copy($original, $runtime)
+            [IO.File]::WriteAllText((Join-Path $directory 'Write-AppEventLog.ahk'), '; fixture presence')
+            [IO.File]::WriteAllText((Join-Path $directory 'CeratopsKeyboardLayout-Service.ahk'), @'
+#Requires AutoHotkey v2.0.19+
+#SingleInstance Off
+#NoTrayIcon
+code := Integer(A_Args[4])
+if code = 11 {
+    FileAppend("fixture stdout", "*")
+    FileAppend("fixture stderr", "**")
+    ExitApp(7)
+}
+if code = 13
+    Sleep(30000)
+FileAppend(code "`n", A_ScriptDir "\_events.txt")
+ExitApp(code = 12 ? 7 : 0)
+'@)
+            $previous = $script:AppUpdateLogEnabled
+            $script:AppUpdateLogEnabled = $true
+            try {
+                foreach ($code in @(0, 0, 11, 12, 13)) {
+                    $warnings = @()
+                    $result = @(Write-AppUpdateEvent INFO test.writer $code $directory `
+                        -WarningVariable warnings -WarningAction SilentlyContinue)
+                    Assert-Equal $result.Count 0 'Logging does not alter the updater result'
+                    Assert-Equal @($warnings).Count ([int]($code -ne 0)) 'Writer failure warning count'
+                    if ($code -ne 0) {
+                        $message = [string]$warnings[0]
+                        if (-not $message.Contains($runtime) -or -not $message.Contains('--write-event INFO test.writer') -or
+                            -not $message.Contains('exit=') -or -not $message.Contains('stdout=') -or -not $message.Contains('stderr=')) {
+                            throw "Writer failure lost command diagnostics: $message"
+                        }
+                        if ($code -eq 11 -and (-not $message.Contains('fixture stdout') -or -not $message.Contains('fixture stderr'))) {
+                            throw 'Writer failure lost child output streams.'
+                        }
+                        if ($code -eq 13 -and -not $message.Contains('timed out')) { throw 'Stuck writer was not bounded.' }
+                        # A new call after either side of a record effect succeeds.
+                        Write-AppUpdateEvent INFO test.writer 0 $directory
+                    }
+                }
+                [IO.File]::Delete($runtime)
+                $warnings = @()
+                Write-AppUpdateEvent INFO test.writer 0 $directory -WarningVariable warnings -WarningAction SilentlyContinue
+                Assert-Equal @($warnings).Count 1 'Missing runtime reports a launch failure'
+                [IO.File]::Copy($original, $runtime)
+                Write-AppUpdateEvent INFO test.writer 0 $directory
+                Assert-Equal ([IO.File]::ReadAllLines((Join-Path $directory '_events.txt')).Length) 7 'Fresh calls complete after interruptions'
+            } finally { $script:AppUpdateLogEnabled = $previous }
+        }
+        Test-Case 'bounded operational logs' {
+            $repositoryRoot = Split-Path $PSScriptRoot -Parent
+            $runtime = Join-Path $repositoryRoot 'CeratopsKeyboardLayout.exe'
+            $test = Join-Path $PSScriptRoot 'Test-ShortcutKeys.ahk'
+            $arguments = '/ErrorStdOut=UTF-8 "{0}" "{1}" --diagnostics-only' -f $test, $testRoot
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo.FileName = $runtime
+            $process.StartInfo.Arguments = $arguments
+            $process.StartInfo.UseShellExecute = $false
+            $process.StartInfo.CreateNoWindow = $true
+            $process.StartInfo.RedirectStandardOutput = $true
+            $process.StartInfo.RedirectStandardError = $true
+            try {
+                $null = $process.Start()
+                if (-not $process.WaitForExit(30000)) { $process.Kill(); $process.WaitForExit(); throw 'Log checks timed out.' }
+                if ($process.ExitCode -ne 0) {
+                    throw "Log checks failed: $runtime $arguments (exit $($process.ExitCode)); stdout=$($process.StandardOutput.ReadToEnd()); stderr=$($process.StandardError.ReadToEnd())"
+                }
+            } finally { $process.Dispose() }
+        }
         Test-Case 'Windows can execute an accepted file while writes are denied' {
             $path = Join-Path $testRoot 'locked-command.exe'
             [IO.File]::Copy((Join-Path $env:WINDIR 'System32\cmd.exe'), $path)
@@ -549,7 +652,7 @@ try {
                 finally { $process.Dispose() }
             } finally { $package.Handle.Dispose() }
         }
-        Test-Case 'ordinary relaunch and service takeover' {
+        Test-Case 'ordinary relaunch and fresh launch after interruption' {
             # Include the production script without running its tray startup. The
             # workers use the same script path, so its real singleton policy
             # decides whether the second launch can disturb the first.
@@ -565,7 +668,6 @@ FileAppend(DllCall("GetCurrentProcessId", "UInt") "`n", A_Args[1])
 Sleep(30000)
 '@ -f $appScript))
             $arguments = '/ErrorStdOut=UTF-8 "{0}" "{1}"' -f $probeScript, $ready
-            $serviceArguments = '/script /restart /ErrorStdOut=UTF-8 "{0}" "{1}"' -f $probeScript, $ready
             $workers = [Collections.Generic.List[Diagnostics.Process]]::new()
             try {
                 $first = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
@@ -586,49 +688,16 @@ Sleep(30000)
                     Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 1 "Duplicate $attempt skipped startup"
                 }
 
-                # The service's /restart launch takes ownership of an ordinary copy.
-                $serviceOutput = Join-Path $testRoot '_service-stdout.txt'
-                $serviceError = Join-Path $testRoot '_service-stderr.txt'
-                $service = Start-Process -FilePath $runtime -ArgumentList $serviceArguments -WindowStyle Hidden -PassThru `
-                    -RedirectStandardOutput $serviceOutput -RedirectStandardError $serviceError
-                $workers.Add($service)
-                Assert-Equal ($first.WaitForExit(10000)) $true 'Service launch replaced the ordinary companion'
+                # Recovery is tested through the service owner's exact-path kill
+                # checks in Test-ShortcutKeys. This fixture checks the singleton.
+                $first.Kill(); $first.WaitForExit()
+                $replacement = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                $workers.Add($replacement)
                 $deadline.Restart()
                 while ([IO.File]::ReadAllLines($ready).Length -lt 2 -and $deadline.Elapsed.TotalSeconds -lt 10) {
                     [Threading.Thread]::Sleep(25)
                 }
-                if ([IO.File]::ReadAllLines($ready).Length -ne 2) {
-                    $service.Refresh()
-                    $state = if ($service.HasExited) { "exit $($service.ExitCode)" } else { 'still running' }
-                    $stdout = if ([IO.File]::Exists($serviceOutput)) { [IO.File]::ReadAllText($serviceOutput) } else { '<absent>' }
-                    $stderr = if ([IO.File]::Exists($serviceError)) { [IO.File]::ReadAllText($serviceError) } else { '<absent>' }
-                    throw "Service launch $runtime $serviceArguments reached no body; $state; stdout=$stdout; stderr=$stderr"
-                }
-                $service.Refresh()
-                Assert-Equal $service.HasExited $false 'Service companion remains active'
-                $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
-                $workers.Add($duplicate)
-                Assert-Equal ($duplicate.WaitForExit(10000)) $true 'Ordinary relaunch exited after service takeover'
-                $service.Refresh()
-                Assert-Equal $service.HasExited $false 'Ordinary relaunch preserved service ownership'
-
-                # Repeated service takeover and a fresh launch after interruption.
-                $nextService = Start-Process -FilePath $runtime -ArgumentList $serviceArguments -WindowStyle Hidden -PassThru
-                $workers.Add($nextService)
-                Assert-Equal ($service.WaitForExit(10000)) $true 'Repeated service launch replaced its predecessor'
-                $deadline.Restart()
-                while ([IO.File]::ReadAllLines($ready).Length -lt 3 -and $deadline.Elapsed.TotalSeconds -lt 10) {
-                    [Threading.Thread]::Sleep(25)
-                }
-                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 3 'Repeated service companion reached its body'
-                $nextService.Kill(); $nextService.WaitForExit()
-                $replacement = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
-                $workers.Add($replacement)
-                $deadline.Restart()
-                while ([IO.File]::ReadAllLines($ready).Length -lt 4 -and $deadline.Elapsed.TotalSeconds -lt 10) {
-                    [Threading.Thread]::Sleep(25)
-                }
-                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 4 'Fresh companion started after interruption'
+                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 2 'Fresh companion started after interruption'
                 $replacement.Refresh()
                 Assert-Equal $replacement.HasExited $false 'Fresh companion remains active'
                 $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
@@ -636,7 +705,7 @@ Sleep(30000)
                 Assert-Equal ($duplicate.WaitForExit(10000)) $true 'Fresh companion rejects a repeat launch'
                 $replacement.Refresh()
                 Assert-Equal $replacement.HasExited $false 'Repeat launch preserves fresh companion'
-                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 4 'Repeat launch skipped startup'
+                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 2 'Repeat launch skipped startup'
             } finally {
                 foreach ($worker in $workers) {
                     $worker.Refresh()

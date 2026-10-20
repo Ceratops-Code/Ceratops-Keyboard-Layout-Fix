@@ -25,16 +25,19 @@ text, selection, clipboard, and active keyboard untouched.
 Adding or removing a supported keyboard takes effect on the next conversion
 shortcut, without restarting Ceratops. It reads Windows' available-layout list
 once per request and reuses its conversion tables unless that list changes.
-At startup, installed copies check GitHub for a newer stable release and ask
-before upgrading. **Check for updates** in the tray menu runs the same check
-on demand and reports when the app is up to date, with a green check, or the
-check fails.
+The installed service checks GitHub every 24 hours and automatically installs a
+newer stable release without a confirmation or administrator prompt. Its next
+check time survives service and Windows restarts. Missed days cause one check
+when the service resumes. **Check for updates** in the tray menu remains
+available on demand and reports the result.
 Ceratops stays usable during the check and download. The updater checks the
 new installer's size and SHA-256 digest before running it, without requesting a
 previous release. A download failure leaves the installation unchanged. If
 setup fails after it starts, the installation may be incomplete; run the latest
 published installer manually. Setup retains the registered installation folder.
-Offline startup checks are quiet; portable copies do not upgrade the installed app.
+Automatic failures are logged and the next attempt is the following day.
+A Startup fallback without the service checks at sign-in and asks before an
+upgrade. Portable copies do not upgrade the installed app.
 Installer filenames include their version, such as
 `CeratopsKeyboardLayout-Setup-1.0.12.exe`. Install version 1.0.12 manually when
 upgrading from an earlier release. Earlier updaters expect the unversioned filename.
@@ -60,10 +63,22 @@ Press a combination in each box and save. The checkbox before the Windows
 flag and **WinKey +** adds the Windows key; an empty box disables a shortcut.
 The checkbox has no drawn caption; its separate screen-reader name is **WinKey**,
 so changing display scale cannot expose clipped label fragments beside the flag.
-The tray icon has no hover tooltip. A closer crop of Trixie's green face fills
-more of the small icon with visible artwork, with no keyboard or surrounding
-padding. Windows controls the tray's physical icon size; increasing the image's
-resolution alone does not enlarge it. The PNG, program icon, tray icon, and
+The tray menu shows the app version. Hovering opens no tooltip or popup.
+**Force restart Ceratops** restarts the installed service and terminates stuck
+tray processes from this installation. The same command is available in the
+Start Menu when the tray app itself cannot respond; Windows asks for
+administrator permission when needed.
+Upgrades use the recovery worker bundled with the new installer to stop stuck
+old processes before replacing files, then start the new version automatically.
+Operational logs record starts, stops, recovery, upgrades and errors, with no
+typing, converted text or routine shortcut activity. Elevated processes write to
+`%ProgramData%\CeratopsKeyboardLayoutLogs`; ordinary processes use
+`%LocalAppData%\CeratopsKeyboardLayout\Logs`. Each component keeps at most three
+1 MiB files.
+A closer crop of Trixie's green face fills more of the small icon with visible
+artwork, with no keyboard or surrounding padding. Windows controls the tray's
+physical icon size; increasing the image's resolution alone does not enlarge it.
+The PNG, program icon, tray icon, and
 installer use the same artwork.
 Settings are shared by this installation, in
 `%ProgramData%\CeratopsKeyboardLayout\Shortcuts.ini`. They survive upgrades and

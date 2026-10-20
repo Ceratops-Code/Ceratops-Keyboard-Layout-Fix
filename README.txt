@@ -21,7 +21,41 @@ Combinations align at their first character, including custom combinations.
 A single left click waits for Windows' double-click interval; right-click opens immediately.
 The WinKey checkbox uses Windows' recognizable flag symbol. Its screen-reader name
 is separate from the drawing, so display scaling cannot expose clipped label fragments.
-The tray icon has no hover tooltip.
+The tray menu shows the app version. Hovering opens no tooltip or popup.
+An installed copy reads the version registered by setup; a source checkout
+reads its setup definition.
+Force restart Ceratops in the tray menu or Start Menu runs an independent
+recovery worker. The Start Menu command works even when the tray app is frozen.
+It asks for administrator permission, stops the owned service, force-terminates
+its process if the stop is stuck, terminates this installation's old tray
+processes and starts the service again. Executable path, script path and process
+creation time identify the targets; other AutoHotkey scripts are left alone.
+Recovery reports an error if Windows cannot finish terminating a process.
+This command is available only when this installation owns the Ceratops service.
+Upgrades automatically use the NEW installer's extracted recovery worker before
+replacing files. It stops the old service and terminates this installation's
+remaining tray/service processes, including stuck instances from older releases.
+The new service starts only after the replacement files are installed. Setup
+holds the restart lock through this change; a competing restart cannot race it.
+If Windows refuses termination, setup stops before replacing files.
+
+Write-AppEventLog.ahk owns operational logs for tray, service, recovery, setup
+and updater components. Elevated/SYSTEM processes use the protected directory
+%ProgramData%\CeratopsKeyboardLayoutLogs; ordinary processes use
+%LocalAppData%\CeratopsKeyboardLayout\Logs. Each component retains its current
+<component>.log and at most two predecessors (.log.1 and .log.2), each at most
+1 MiB. Startup and each append enforce the limit under an exclusive,
+delete-on-close <component>.log.lock. Interrupted rotations are completed from
+the current files on the next write; incomplete trailing records are discarded.
+Only these fixed component files belong to the logger. Other files are untouched.
+Protected logs refuse user-owned folders, junctions, symbolic links and hardlinks.
+Logs contain start/stop, forced termination, upgrade outcomes and error type,
+source location and Windows error number where available. They contain no typed
+text, converted text, clipboard data, exception messages or routine user actions.
+Logs remain after uninstall for diagnosis; their total size remains bounded.
+If log storage fails, the application keeps running and reports the log failure
+to Windows Application events (or debugger output if that is also unavailable).
+
 A closer crop of Trixie's green face fills more of the small icon with visible
 artwork, with no keyboard or surrounding padding. Windows controls the tray's
 physical icon size; increasing the image's resolution alone does not enlarge it.
@@ -118,31 +152,47 @@ Updates
 Version 1.0.12 introduces versioned installer filenames. Install it manually
 when upgrading from an earlier release, whose updater expects the previous
 filename. Later automatic updates use a versioned installer for the new version.
-Each start of an installed tray app checks the public GitHub Releases API for
-a newer stable version and asks whether to upgrade. No account is needed.
-Choosing No keeps the current version; the next normal start checks again.
-An offline or unavailable GitHub API does not interrupt the app or show errors.
-Only the registered installed copy checks; unpacked source copies skip it.
-The check sends no text or clipboard content to GitHub.
+The installed service checks the public GitHub Releases API every 24 hours and
+automatically installs a newer stable version. It runs the separate update worker
+as SYSTEM, without a confirmation, administrator prompt or foreground dialog.
+The first check runs after installation completes. Restarting Ceratops or Windows
+keeps the next check time; missed days cause one overdue check, without a burst.
+The service claims the day's attempt before launching its worker. An interrupted
+or failed launch counts for that day, is logged, and waits until the next day.
+Failed network checks and upgrades are also logged without stopping conversion.
+No account is needed. Unpacked source copies cannot upgrade the installed app.
+The check sends no text or clipboard content to GitHub. A Startup fallback without
+the service still checks at sign-in and asks before downloading an upgrade.
 Choose Check for updates from the green tray icon's menu to check on demand.
 This reports when Ceratops is up to date with a green check, the check cannot connect, or another
 check is already running. If a newer stable version is available, it asks
 before downloading and uses the same installation flow below.
 
-Choosing Yes starts a separate Windows PowerShell helper. A normally launched
+Choosing Yes in a manual check starts a separate Windows PowerShell helper. A normally launched
 tray app requests administrator approval once for installation; an already
 elevated tray app does not need another prompt. The helper downloads only the
 new installer from this repository and checks its GitHub SHA-256 digest and byte
 count before installation starts. It holds the accepted file against writes
 and deletion through setup. If the package cannot be obtained, it reports
-Upgrade failed and leaves the running version untouched.
+Upgrade failed and leaves the running version untouched. Automatic checks use
+the same package checks and installation flow, reporting failures in the logs.
 
 Hotkeys continue working during checks/downloads and pause briefly while setup
 replaces the app and restarts its service or Startup fallback. If setup fails
 or registers the wrong version, the helper reports that the installation may
 be incomplete and directs you to the latest published installer for manual
 repair. It does not download or run the previous installer.
-Setup's immediate restart skips the update prompt; later starts check normally.
+Service-launched tray copies skip startup update prompts because the service
+owns the daily check. A fallback's immediate upgrade restart also skips its
+startup check. An existing owned service is kept during an unattended upgrade
+with no signed-in desktop; it launches the tray when someone next signs in.
+
+CeratopsKeyboardLayout-Service.ahk owns NextAutomaticUpdateCheckUtc under its
+Windows service Parameters registry key. This UTC deadline is active schedule
+configuration, separate from observational logs, and is removed with the service.
+The daily worker has a machine-wide check lock and shares the normal upgrade
+lock, so sessions cannot start overlapping automatic upgrades. Checks wait
+while setup holds its restart lock, avoiding a partially updated registration.
 
 To run the unpacked copy instead, launch CeratopsKeyboardLayout.exe with
 CeratopsKeyboardLayout.ahk as its argument.
@@ -171,7 +221,9 @@ The protected Program Files directory owns the scripts, pinned runtime, UIA
 dependency, licenses and icon assets. It contains the current application
 version and, during updates, the protected UpdateCache subdirectory.
 The service starts automatically at Windows boot and owns tray companions for
-active desktop sessions; it stops them when removed. The common Startup
+active desktop sessions; it waits for each owned tray process to exit before
+reporting a completed stop. An incomplete stop blocks setup from replacing the
+running files. The common Startup
 shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
 The project folder owns CeratopsKeyboardLayout-Setup.iss and versioned
@@ -209,7 +261,8 @@ machine-wide upgrade lock it creates a unique attempt directory for the new
 installer. Before each upgrade it removes abandoned downloads and keeps at most
 one manual recovery installer saved by an older updater. After each attempt it
 deletes the new download; a successful install also clears the older recovery
-file. Uninstall removes the owned cache. There are no update history logs.
+file. Uninstall removes the owned cache. Bounded operational events use the
+shared logger described above; the cache contains no update history.
 Links and unrelated directories are left untouched; cleanup failures are
 reported instead of hiding the installation outcome. A session-wide check lock
 prevents duplicate prompts.
@@ -265,6 +318,20 @@ Windows must be unlocked for accessibility and foreground shortcut checks.
 Pass --ui-only after the shortcut test's temp-root argument to check the Key
 Combinations dialog, tray menu, double-click and interruption behavior without
 registering global shortcuts, sending keyboard input or stopping the service.
+Pass --dispatch-only to check queued requests and owned companion shutdown,
+force restart interruption boundaries, and termination of a suspended child
+while preserving a different script using the same runtime. These checks do
+not stop the installed service.
+Pass --diagnostics-only after the shortcut test's temp-root argument to check
+bounded rotation, interrupted writes, concurrent writers, private error metadata
+and refusal of substituted log paths. The update suite runs these same checks.
+Pass --physical-hover after the shortcut test's temp-root argument to move the
+real pointer over an isolated candidate tray icon and save _tray-hover.png in
+that root. It refuses the Windows lock screen, registers no global shortcuts,
+and leaves the installed service untouched. The screenshot is the caller's
+temporary review output; a later run replaces it and the caller removes it
+after review. Daily scheduling checks run with --dispatch-only, including
+restart persistence, missed days, leap days and interruptions around each effect.
 
 Dependencies
 The Ceratops source code and installer script use the MIT license in LICENSE.
