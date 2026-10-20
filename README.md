@@ -155,8 +155,10 @@ Ceratops-Code publisher, copyright, and project/support/update links. These
 details do not replace a trusted code signature.
 Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's
 corresponding GPL source archive. Matching draft uploads resume after interruption;
-published assets are never overwritten. The app's SDLC `install` action consumes
-the same successful build and runs setup silently from an administrator terminal.
+published assets are never overwritten. The app's SDLC `install` action requires
+that stable version to be published on GitHub first. Its tag must identify the
+selected source commit, and uploaded asset checksums must match the successful
+build. Only then does setup run silently from an administrator terminal.
 Building alone does not publish or install it.
 The [user guide](README.txt) lists the desktop regression checks.
 `Tests/Test-AppUpdates.ps1` checks release selection, consent, download integrity,

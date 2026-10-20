@@ -618,6 +618,103 @@ ExitApp(code = 12 ? 7 : 0)
                 Assert-Equal ([IO.File]::ReadAllLines((Join-Path $directory '_events.txt')).Length) 7 'Fresh calls complete after interruptions'
             } finally { $script:AppUpdateLogEnabled = $previous }
         }
+        Test-Case 'native service thread process lookup' {
+            $repositoryRoot = Split-Path $PSScriptRoot -Parent
+            $runtime = Join-Path $repositoryRoot 'CeratopsKeyboardLayout.exe'
+            $probeScript = Join-Path $testRoot '_check-service-thread.ahk'
+            $probeSource = @'
+#Requires AutoHotkey v2.0.19+
+#Include __SERVICE_SCRIPT__
+nativeFailure := ""
+ReadProcessesOnNativeThread(boundary) {
+    global nativeFailure
+    ownsApartment := false, interrupted := false
+    apartment := 0, qualifier := 0
+    try {
+        if DllCall("ole32\CoGetApartmentType", "Int*", &apartment, "Int*", &qualifier, "Int") != -2147221008
+            throw Error("The native test thread must initially have no COM apartment")
+        if boundary = 1
+            throw Error("service-thread-test-interruption")
+        ownsApartment := InitializeServiceThreadCom()
+        if !ownsApartment
+            throw Error("The service did not initialize the native thread")
+        if boundary = 2
+            throw Error("service-thread-test-interruption")
+        Loop 2 {
+            found := false
+            for process in ReadRunningAppProcesses() {
+                if process.Pid = DllCall("GetCurrentProcessId", "UInt")
+                    found := true
+            }
+            if !found
+                throw Error("The native service lookup did not find its own process")
+        }
+        if boundary = 3
+            throw Error("service-thread-test-interruption")
+    } catch Error as failure {
+        if boundary && failure.Message = "service-thread-test-interruption"
+            interrupted := true
+        else
+            nativeFailure := failure.Message
+    } finally {
+        if ownsApartment
+            DllCall("ole32\CoUninitialize")
+    }
+    if boundary && !interrupted
+        nativeFailure := "The requested interruption did not occur"
+    if DllCall("ole32\CoGetApartmentType", "Int*", &apartment, "Int*", &qualifier, "Int") != -2147221008
+        nativeFailure := "The native service thread leaked its COM apartment"
+    return 0
+}
+try {
+    callback := CallbackCreate(ReadProcessesOnNativeThread, , 1)
+    for boundary in [0, 1, 2, 3] {
+        nativeThreadHandle := DllCall("CreateThread", "Ptr", 0, "UPtr", 0, "Ptr", callback,
+            "Ptr", boundary, "UInt", 0, "Ptr", 0, "Ptr")
+        if !nativeThreadHandle
+            throw OSError()
+        try {
+            if DllCall("WaitForSingleObject", "Ptr", nativeThreadHandle, "UInt", 10000, "UInt") != 0
+                throw Error("The native service lookup timed out")
+        } finally DllCall("CloseHandle", "Ptr", nativeThreadHandle)
+        if nativeFailure != ""
+            throw Error(nativeFailure)
+    }
+    CallbackFree(callback) ; Every native thread has exited before freeing code.
+    FileAppend("PASS native service lookups, repeated calls and interruption cleanup`n", "*")
+    ExitApp(0)
+} catch Error as failure {
+    FileAppend("FAIL native service thread: " failure.Message "`n", "**")
+    ExitApp(1) ; Process exit also retires a timed-out callback without freeing live code.
+}
+'@
+            [IO.File]::WriteAllText($probeScript, $probeSource.Replace('__SERVICE_SCRIPT__',
+                (Join-Path $repositoryRoot 'CeratopsKeyboardLayout-Service.ahk')))
+            $arguments = '/ErrorStdOut=UTF-8 "{0}"' -f $probeScript
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo.FileName = $runtime
+            $process.StartInfo.Arguments = $arguments
+            $process.StartInfo.UseShellExecute = $false
+            $process.StartInfo.CreateNoWindow = $true
+            $process.StartInfo.RedirectStandardOutput = $true
+            $process.StartInfo.RedirectStandardError = $true
+            try {
+                $null = $process.Start()
+                $stdout = $process.StandardOutput.ReadToEndAsync()
+                $stderr = $process.StandardError.ReadToEndAsync()
+                $timedOut = -not $process.WaitForExit(20000)
+                if ($timedOut) { $process.Kill(); $null = $process.WaitForExit(5000) }
+                $output = $stdout.GetAwaiter().GetResult()
+                $errors = $stderr.GetAwaiter().GetResult()
+                if ($timedOut -or $process.ExitCode -ne 0) {
+                    throw ('Command: "{0}" {1}; Exit: {2}; Timed out: {3}; stdout: {4}; stderr: {5}' -f
+                        $runtime, $arguments, $process.ExitCode, $timedOut,
+                        $(if ($output) { $output } else { '<absent>' }),
+                        $(if ($errors) { $errors } else { '<absent>' }))
+                }
+                Assert-Equal ($output.Contains('PASS native service lookups')) $true 'Native thread completed'
+            } finally { $process.Dispose() }
+        }
         Test-Case 'bounded operational logs' {
             $repositoryRoot = Split-Path $PSScriptRoot -Parent
             $runtime = Join-Path $repositoryRoot 'CeratopsKeyboardLayout.exe'

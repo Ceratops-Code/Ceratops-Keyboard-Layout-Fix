@@ -252,8 +252,10 @@ Publication requires a successful current build and authenticated GitHub CLI.
 It resumes matching draft uploads, checks the tag's source commit and uploaded
 checksums, and publishes only after both required assets are present. Published
 release assets are never replaced or deleted; each keeps its version identity.
-The app's SDLC install action consumes that successful build, runs setup silently,
-and requires an administrator terminal. Building does not install or publish it.
+The app's SDLC install action requires the stable release on GitHub first. Its
+tag must identify the selected source commit, and uploaded asset checksums must
+match the successful build. Only then does setup run silently from an
+administrator terminal. Building does not install or publish it.
 The conversion code creates no files or text logs. Maps and clipboard backups
 exist in memory and are released after use/exit.
 Update-AppInstall.ps1 owns UpdateCache beside the installed scripts. Under a

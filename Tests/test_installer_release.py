@@ -56,6 +56,8 @@ class BuildTests(unittest.TestCase):
         self.enterContext(mock.patch.object(release, "installer_version", side_effect=lambda path, root: self.version))
 
     def compile(self, argv: list[str], root: pathlib.Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        if argv[:3] == ["gh", "repo", "view"]:
+            return subprocess.CompletedProcess(argv, 0, b"example/keyboard\n", b"")
         if argv[:2] == ["git", "show"]:
             data = (self.root / release.SETUP_SCRIPT).read_bytes() if argv[2].endswith(":" + release.SETUP_SCRIPT) else json.dumps(self.dependencies).encode()
             return subprocess.CompletedProcess(argv, 0, data, b"")
@@ -78,6 +80,28 @@ class BuildTests(unittest.TestCase):
 
     def compiler_calls(self) -> list[Any]:
         return [call for call in self.command.call_args_list if call.args[0][0] == str(self.compiler)]
+
+    def published_github(self, record: dict[str, Any]) -> FakeGitHub:
+        github = FakeGitHub(self.root, record)
+        github.tag_commit = github.commit
+        github.release = {
+            "id": 1, "tag_name": f"v{record['version']}", "target_commitish": github.commit,
+            "draft": False, "prerelease": False, "published_at": "2026-10-21T00:00:00Z",
+            "assets": [github.asset(name) for name in record["artifacts"]],
+        }
+        return github
+
+    def install(self, github: FakeGitHub) -> int:
+        with mock.patch.object(release, "source_commit", return_value=github.commit), \
+             mock.patch.object(release, "build_store", return_value=self.store), \
+             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
+             mock.patch.object(release.subprocess, "run", side_effect=github.api_command), \
+             mock.patch.object(sys, "argv", ["release-installer.py", "install", "--repo-root", str(self.root)]), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return release.main()
+
+    def installer_calls(self) -> list[Any]:
+        return [call for call in self.command.call_args_list if call.args[0][0] == str(self.root / self.setup_name)]
 
     def test_completed_build_contains_installer_and_corresponding_source(self) -> None:
         bundle, record = self.build()
@@ -270,15 +294,74 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(self.compiler_calls(), [])
 
     def test_installation_consumes_completed_build_without_recompilation(self) -> None:
-        self.build()
-        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
-             mock.patch.object(release, "build_store", return_value=self.store), \
-             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
-             mock.patch.object(sys, "argv", ["release-installer.py", "install", "--repo-root", str(self.root)]), \
-             contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(release.main(), 0)
+        _, record = self.build()
+        self.assertEqual(self.install(self.published_github(record)), 0)
         self.assertEqual(len(self.compiler_calls()), 1)
         self.assertEqual(self.command.call_args.args[0][0], str(self.root / self.setup_name))
+
+    def test_unpublished_or_incomplete_github_release_blocks_setup(self) -> None:
+        _, record = self.build()
+        for condition in ("missing", "draft", "prerelease", "unpublished", "wrong-tag", "wrong-commit", "missing-asset", "wrong-asset"):
+            with self.subTest(condition=condition):
+                github = self.published_github(record)
+                assert github.release is not None
+                if condition == "missing":
+                    github.release = None
+                elif condition == "draft":
+                    github.release["draft"] = True
+                elif condition == "prerelease":
+                    github.release["prerelease"] = True
+                elif condition == "unpublished":
+                    github.release["published_at"] = None
+                elif condition == "wrong-tag":
+                    github.release["tag_name"] = "v9.9.9"
+                elif condition == "wrong-commit":
+                    github.tag_commit = "b" * 40
+                elif condition == "missing-asset":
+                    github.release["assets"].pop()
+                else:
+                    github.release["assets"][0]["digest"] = "sha256:other"
+                self.assertEqual(self.install(github), 1)
+                self.assertEqual(self.installer_calls(), [])
+                self.assertEqual((github.creations, github.publications, github.uploads), (0, 0, []))
+
+    def test_github_read_failure_blocks_setup(self) -> None:
+        _, record = self.build()
+        github = self.published_github(record)
+        with mock.patch.object(github, "request", side_effect=OSError("GitHub unavailable")):
+            self.assertEqual(self.install(github), 1)
+        self.assertEqual(self.installer_calls(), [])
+
+    def test_repeated_installation_and_interruption_use_the_published_build(self) -> None:
+        _, record = self.build()
+        github = self.published_github(record)
+
+        def check_interrupted_install(boundary: str) -> None:
+            target: list[bytes] = []
+            interrupt = True
+
+            def install_effect(argv: list[str], root: pathlib.Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+                if argv[0] == str(self.root / self.setup_name):
+                    if interrupt and boundary == "before":
+                        raise release.ReleaseError("installation interrupted before launch")
+                    target[:] = [(self.root / self.setup_name).read_bytes()]
+                    if interrupt and boundary == "after":
+                        raise release.ReleaseError("installation interrupted after launch")
+                return self.compile(argv, root, **kwargs)
+
+            self.command.side_effect = install_effect
+            self.assertEqual(self.install(github), 1)
+            self.assertEqual(target, [] if boundary == "before" else [b"standalone installer"])
+            interrupt = False
+            self.assertEqual(self.install(github), 0)
+            self.assertEqual(self.install(github), 0)
+            self.assertEqual(target, [b"standalone installer"])
+
+        for boundary in ("before", "after"):
+            with self.subTest(boundary=boundary):
+                check_interrupted_install(boundary)
+        self.assertEqual(len(self.compiler_calls()), 1)
+        self.assertEqual((github.creations, github.publications, github.uploads), (0, 0, []))
 
     def test_unreadable_snapshot_fails_cleanly_without_an_installer(self) -> None:
         def unreadable_archive(argv: list[str], root: pathlib.Path) -> subprocess.CompletedProcess[bytes]:
@@ -442,6 +525,18 @@ class PublishTests(unittest.TestCase):
 
 
 class GitHubResponseTests(unittest.TestCase):
+    def test_child_failure_keeps_command_status_and_both_streams(self) -> None:
+        for stdout, stderr in ((b"child output", b"child error"), (b"", b"")):
+            response = subprocess.CompletedProcess([], 7, stdout, stderr)
+            with mock.patch.object(release.subprocess, "run", return_value=response):
+                with self.assertRaises(release.ReleaseError) as observed:
+                    release.run_command(["gh", "repo", "view"], REPOSITORY)
+            message = str(observed.exception)
+            self.assertIn('["gh", "repo", "view"]', message)
+            self.assertIn("Exit status: 7", message)
+            self.assertIn("stdout:\n" + (stdout.decode() or "<absent>"), message)
+            self.assertIn("stderr:\n" + (stderr.decode() or "<absent>"), message)
+
     def test_only_404_can_mean_a_missing_release(self) -> None:
         for status in (401, 403, 422, 429, 503):
             response = subprocess.CompletedProcess([], 1, json.dumps({"status": str(status), "message": "denied"}).encode(), b"")

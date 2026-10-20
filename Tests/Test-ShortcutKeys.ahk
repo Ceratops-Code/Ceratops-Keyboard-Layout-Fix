@@ -144,7 +144,6 @@ CheckPhysicalTrayHover(root) {
     MouseGetPos(&originalX, &originalY)
     opened := false, chevron := 0
     try {
-        A_IconTip := "" ; Reproduce the former empty-tooltip input to the shell.
         InitializeAppTray(GetServiceAppDirectory() "\CeratopsKeyboardLayout.ico")
         ; This fixture creates only its own tray icon, without global shortcuts,
         ; shared settings, update workers or changes to the installed service.
@@ -177,12 +176,18 @@ CheckPhysicalTrayHover(root) {
         Sleep(1600)
         RequireUnlockedTrayDesktop()
         CaptureTrayHover(root "\_tray-hover.png", x, y)
-        for tooltip in WinGetList("ahk_class tooltips_class32") {
+        tooltipWindows := WinGetList("ahk_class tooltips_class32")
+        tooltipWindows.Push(WinGetList("ahk_class Xaml_WindowedPopupClass")*)
+        for tooltip in tooltipWindows {
             if !DllCall("IsWindowVisible", "Ptr", tooltip)
+                continue
+            ; Windows retains an empty XAML host after its tooltip disappears.
+            if WinGetClass("ahk_id " tooltip) = "Xaml_WindowedPopupClass"
+                && !UIA.ElementFromHandle(tooltip).ElementExist({Type: "ToolTip", IsOffscreen: false})
                 continue
             WinGetPos(&tx, &ty, &tw, &th, "ahk_id " tooltip)
             if Abs(tx - x) < 180 && Abs(ty - y) < 180
-                throw Error("A visible tooltip appeared while hovering over the candidate icon")
+                throw Error("Hover popup class=" WinGetClass("ahk_id " tooltip) "`n" UIA.ElementFromHandle(tooltip).DumpAll(" ", 4))
         }
     } finally {
         A_IconHidden := true

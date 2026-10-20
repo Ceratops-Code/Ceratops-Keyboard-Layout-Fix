@@ -703,6 +703,17 @@ ProbeElevatedLaunch() {
 
 ; The SCM calls this entry point on its service thread. It polls active sessions
 ; so logon and reconnect work without a scheduled task or interactive service.
+InitializeServiceThreadCom() {
+    ; AutoHotkey initializes its main thread, but SCM creates another native
+    ; thread. WMI must have an apartment there before the first process lookup.
+    result := DllCall("ole32\CoInitializeEx", "Ptr", 0, "UInt", 0x4, "Int")
+    if result = -2147417850 ; RPC_E_CHANGED_MODE: an existing apartment is usable.
+        return false ; Its owner must release it, not this service callback.
+    if result < 0
+        throw OSError(result, "CoInitializeEx")
+    return true ; Both S_OK and S_FALSE require a matching CoUninitialize.
+}
+
 ServiceMain(argumentCount, arguments) {
     global ServiceName, ServiceStatusHandle, ServiceControlCallback, ServiceStopRequested
     ServiceStatusHandle := DllCall("advapi32\RegisterServiceCtrlHandlerExW",
@@ -710,8 +721,9 @@ ServiceMain(argumentCount, arguments) {
     if !ServiceStatusHandle
         return
     SetServiceState(2)
-    exitCode := 0
+    exitCode := 0, ownsComApartment := false
     try {
+        ownsComApartment := InitializeServiceThreadCom()
         SetServiceState(4, 1 | 4)
         WriteAppEvent("INFO", "service.started")
         dailyFailure := ""
@@ -746,6 +758,8 @@ ServiceMain(argumentCount, arguments) {
         }
         WriteAppEvent(exitCode ? "ERROR" : "INFO", "service.stopped", "code=" exitCode)
         SetServiceState(1, 0, exitCode)
+        if ownsComApartment
+            DllCall("ole32\CoUninitialize")
     }
 }
 

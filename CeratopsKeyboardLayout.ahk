@@ -67,9 +67,10 @@ AppTrayIconIsRegistered() {
 }
 
 SuppressAppTrayHover(*) {
-    ; Version 4 suppresses the standard tooltip unless NIF_SHOWTIP is requested.
-    ; Sending empty tooltip text instead leaves a blank hover box on Windows 11.
+    ; Clear AutoHotkey's cached script-name tooltip as well as selecting version
+    ; 4. Either change alone can leave a name popup or blank box on Windows 11.
     ; The tray router handles version 4's packed mouse and keyboard callbacks.
+    A_IconTip := ""
     data := Buffer(A_PtrSize = 8 ? 976 : 956, 0)
     NumPut("UInt", data.Size, data)
     NumPut("Ptr", A_ScriptHwnd, data, A_PtrSize)
