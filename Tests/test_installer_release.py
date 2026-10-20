@@ -335,25 +335,31 @@ class BuildTests(unittest.TestCase):
     def test_repeated_installation_and_interruption_use_the_published_build(self) -> None:
         _, record = self.build()
         github = self.published_github(record)
+
+        def check_interrupted_install(boundary: str) -> None:
+            target: list[bytes] = []
+            interrupt = True
+
+            def install_effect(argv: list[str], root: pathlib.Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+                if argv[0] == str(self.root / self.setup_name):
+                    if interrupt and boundary == "before":
+                        raise release.ReleaseError("installation interrupted before launch")
+                    target[:] = [(self.root / self.setup_name).read_bytes()]
+                    if interrupt and boundary == "after":
+                        raise release.ReleaseError("installation interrupted after launch")
+                return self.compile(argv, root, **kwargs)
+
+            self.command.side_effect = install_effect
+            self.assertEqual(self.install(github), 1)
+            self.assertEqual(target, [] if boundary == "before" else [b"standalone installer"])
+            interrupt = False
+            self.assertEqual(self.install(github), 0)
+            self.assertEqual(self.install(github), 0)
+            self.assertEqual(target, [b"standalone installer"])
+
         for boundary in ("before", "after"):
             with self.subTest(boundary=boundary):
-                target: list[bytes] = []
-                interrupt = True
-                def install_effect(argv: list[str], root: pathlib.Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-                    if argv[0] == str(self.root / self.setup_name):
-                        if interrupt and boundary == "before":
-                            raise release.ReleaseError("installation interrupted before launch")
-                        target[:] = [(self.root / self.setup_name).read_bytes()]
-                        if interrupt and boundary == "after":
-                            raise release.ReleaseError("installation interrupted after launch")
-                    return self.compile(argv, root, **kwargs)
-                self.command.side_effect = install_effect
-                self.assertEqual(self.install(github), 1)
-                self.assertEqual(target, [] if boundary == "before" else [b"standalone installer"])
-                interrupt = False
-                self.assertEqual(self.install(github), 0)
-                self.assertEqual(self.install(github), 0)
-                self.assertEqual(target, [b"standalone installer"])
+                check_interrupted_install(boundary)
         self.assertEqual(len(self.compiler_calls()), 1)
         self.assertEqual((github.creations, github.publications, github.uploads), (0, 0, []))
 
