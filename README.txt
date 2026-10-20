@@ -252,10 +252,23 @@ Publication requires a successful current build and authenticated GitHub CLI.
 It resumes matching draft uploads, checks the tag's source commit and uploaded
 checksums, and publishes only after both required assets are present. Published
 release assets are never replaced or deleted; each keeps its version identity.
-The app's SDLC install action requires the stable release on GitHub first. Its
-tag must identify the selected source commit, and uploaded asset checksums must
-match the successful build. Only then does setup run silently from an
-administrator terminal. Building does not install or publish it.
+The app's SDLC install action consumes the successful build and runs setup
+silently from an administrator terminal. Ceratops owns operation selection and
+order; shipping selects publication before local installation. The repository
+adapter performs each selected effect. Building does not install or publish it.
+The sdlc/sdlc.yml contract declares the operations selected by Ceratops. Its
+repository and installer test actions use scripts/run-tests.py locally and in
+CI. Repository tests cover the updater; local Windows runs also require the
+interactive desktop suites. Installer cases run through pytest in the locked
+Python 3.14 scripts environment. CI uses the pinned Ceratops action to execute
+the same SDLC entries and cannot stand in for the local desktop checks.
+The caller can select CERATOPS_TASK_TEMP_ROOT for test scratch. Otherwise it is
+grouped under <repo-parent>/tmp/<repo-name>/<checkout-name>. Pytest owns numbered
+scratch and keeps the current run and two predecessors, excluding live runs
+from cleanup. Updater tests remove their own private subdirectories. The runner
+creates no ongoing log; optional final result receipts and their retention are
+owned by the caller. Reusing an exact accepted receipt does not rerun tests;
+failed or interrupted receipts require a fresh invocation identity.
 The conversion code creates no files or text logs. Maps and clipboard backups
 exist in memory and are released after use/exit.
 Update-AppInstall.ps1 owns UpdateCache beside the installed scripts. Under a

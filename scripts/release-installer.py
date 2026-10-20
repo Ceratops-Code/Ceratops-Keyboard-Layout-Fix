@@ -9,8 +9,8 @@ The directory has one exclusive lock, at most three completed bundles, and no
 operational log. Private incomplete bundles are removed under the lock at startup
 and on failure. Each checkout keeps its current versioned installer and at most
 two predecessors; orphaned atomic-copy files are removed at startup. Published
-release assets are never replaced or deleted. Installation requires a published
-stable GitHub release whose tag and asset digests match the selected build.
+release assets are never replaced or deleted. Ceratops selects the requested
+SDLC operations and their order; this adapter performs only the selected effect.
 """
 
 from __future__ import annotations
@@ -445,26 +445,6 @@ def publish_installer(root: pathlib.Path, bundle: pathlib.Path, record: Mapping[
         raise ReleaseError("GitHub has not completed the expected release publication.")
 
 
-def require_published_build(root: pathlib.Path, record: Mapping[str, Any], commit: str) -> None:
-    """Block local installation until GitHub owns this exact stable release.
-
-    A completed local bundle is reusable only when its accepted bytes match the
-    uploaded assets. Drafts, unpublished commits, missing assets and unavailable
-    GitHub feedback never authorize launching setup.
-    """
-    repository = run_command(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], root).stdout.decode().strip()
-    tag = f"v{record['version']}"
-    published = github_json(root, f"repos/{repository}/releases/tags/{tag}", missing_ok=True)
-    if (not published or published.get("tag_name") != tag or published.get("draft") is not False
-            or published.get("prerelease") is not False or not published.get("published_at")):
-        raise ReleaseError(f"Publish the stable {tag} GitHub release before local installation.")
-    tagged_commit = github_json(root, f"repos/{repository}/commits/{tag}")
-    if tagged_commit["sha"] != commit:
-        raise ReleaseError(f"{tag} belongs to a different source commit; local installation is blocked.")
-    if release_assets_match(published, record["artifacts"]) != set(record["artifacts"]):
-        raise ReleaseError(f"{tag} is missing accepted release assets; local installation is blocked.")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "publish", "install"))
@@ -490,8 +470,6 @@ def main() -> int:
                 if not bundle.is_dir():
                     raise ReleaseError("Run the SDLC installer build action before publication or installation.")
                 record = read_build(bundle, identity)
-                if args.action == "install":
-                    require_published_build(root, record, commit)
                 activate_installer(root, bundle, record)
                 retain_builds(store, bundle)
                 if args.action == "publish":

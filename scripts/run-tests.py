@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+"""Run SDLC's repository or installer tests with Ceratops result receipts.
+
+Use the locked scripts environment: uv run --locked scripts/run-tests.py.
+The caller owns result identities, serialization, storage and retention. Without
+result arguments this remains a disposable test invocation. With them, the runner
+writes only the chosen final file, never a sibling staging file. The running
+record is completed only by its owning invocation; a fresh invocation never
+overwrites a valid failed or interrupted attempt. CI runs the noninteractive
+updater suite; a local Windows run also requires the desktop suites. The installer
+suite uses pytest to preserve the existing unittest cases.
+
+The caller may select CERATOPS_TASK_TEMP_ROOT. Otherwise scratch is grouped at
+<repo-parent>/tmp/<repo-name>/<checkout-name>. Pytest owns its numbered scratch,
+retaining the current run and two predecessors and pruning abandoned outputs
+without deleting live runs. The updater suite owns and removes its private
+subdirectory. Bytecode and pytest's persistent cache are disabled. Final result
+receipts remain caller-owned; this runner never invents history paths.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import fnmatch
+import hashlib
+import importlib.metadata
+import json
+import os
+import pathlib
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Mapping
+from typing import Any
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+DEFAULT_TARGETS = ['Tests/test_installer_release.py']
+DESKTOP_TESTS: tuple[tuple[str, str, list[str]], ...] = (
+    ("key-conversion", "Tests/Test-KeyConversion.ahk", []),
+    ("shortcut-dispatch", "Tests/Test-ShortcutKeys.ahk", ["--dispatch-only"]),
+    ("accessible-conversion", "Tests/Test-AccessibleConversion.ahk", []),
+)
+def without_basetemp(arguments: list[str]) -> list[str]:
+    """Remove inherited locations before pytest validates every occurrence."""
+    options = iter(arguments)
+    retained = []
+    for option in options:
+        if option == "--basetemp":
+            next(options, None)
+        elif not option.startswith("--basetemp="):
+            retained.append(option)
+    return retained
+
+
+# Repository check runner interface
+# This shared contract is also emitted as the standard runner's self-contained
+# writer. Repository-specific source/build record APIs above remain independent.
+CHECK_RESULT_SCHEMA = "ceratops-repository-check-result.v1"
+CONTRACT_SCHEMA = "ceratops-test-result-contract.v1"
+CHECK_CONTEXT_ENV = "CERATOPS_REPOSITORY_CHECK_CONTEXT"
+CHECK_CONTEXT_SCHEMA = "ceratops-repository-check-inputs.v1"
+IDENTITY_FIELDS = ("result_id", "candidate_id", "check_id", "check_version")
+
+
+def canonical(value: Any) -> bytes:
+    """Serialize finite, unambiguous JSON directly to the selected final file."""
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+
+
+def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
+
+
+def _nonfinite(value: str) -> Any:
+    raise ValueError("nonfinite JSON value: " + value)
+
+
+def result_path(value: pathlib.Path) -> pathlib.Path:
+    """Reject redirected output; the operation owner selects this final path."""
+    path = value.absolute()
+    for part in (path, *path.parents):
+        if part.is_symlink() or part.is_junction():
+            raise ValueError("result path must not contain a link")
+    if path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
+        raise ValueError("result path must be a single regular file")
+    return path
+
+
+def read_result(path: pathlib.Path) -> tuple[bool, Any]:
+    """Only unparsable/unaccepted bytes can be repaired; I/O errors propagate."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return False, None
+    try:
+        value = json.loads(raw, object_pairs_hook=_object, parse_constant=_nonfinite)
+        canonical(value)
+    except (ValueError, UnicodeError, RecursionError):
+        return True, None
+    return True, value
+
+
+def write_result(path: pathlib.Path, value: dict[str, Any], *, exclusive: bool) -> None:
+    """Flush the final file without creating a staging sibling or result copy."""
+    raw = canonical(value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("xb" if exclusive else "wb") as stream:
+        stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if path.read_bytes() != raw or read_result(path)[1] != value:
+        raise ValueError("result changed during writing")
+
+
+def _execution_fields(value: Any, *, completed: bool) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "startedAt", "finishedAt", "durationSeconds", "workerPid",
+    }:
+        return False
+    if type(value["workerPid"]) is not int or value["workerPid"] <= 0:
+        return False
+    try:
+        start = datetime.datetime.fromisoformat(value["startedAt"])
+        if start.utcoffset() != datetime.timedelta(0):
+            return False
+        if completed:
+            finish = datetime.datetime.fromisoformat(value["finishedAt"])
+            return (finish.utcoffset() == datetime.timedelta(0) and finish >= start
+                    and type(value["durationSeconds"]) in (int, float)
+                    and value["durationSeconds"] >= 0)
+        return value["finishedAt"] is None and value["durationSeconds"] is None
+    except (TypeError, ValueError):
+        return False
+
+
+def prepare_result(
+    path: pathlib.Path, expected: dict[str, Any], *, repair_unaccepted: bool,
+    execution: dict[str, Any] | None = None,
+) -> bool:
+    """Reuse exact acceptance or claim a new attempt without replacing history."""
+    exists, saved = read_result(path)
+    if saved is not None:
+        allowed = set(expected) | {"status", "exit_code"}
+        if "inputs" in expected:
+            allowed.add("execution")
+        if isinstance(saved, dict) and "checks" in saved:
+            allowed.add("checks")
+        if (isinstance(saved, dict) and set(saved) == allowed
+                and all(saved.get(key) == value for key, value in expected.items())
+                and saved.get("status") == "passed"
+                and type(saved.get("exit_code")) is int and saved["exit_code"] == 0
+                and ("inputs" not in expected or _execution_fields(saved.get("execution"), completed=True))
+                and ("checks" not in saved or (isinstance(saved["checks"], list)
+                     and all(isinstance(item, dict) and item.get("status") not in {
+                         "failed", "blocked", "interrupted",
+                     } for item in saved["checks"])))
+                and path.read_bytes() == canonical(saved)):
+            return True
+        if isinstance(saved, dict) and all(saved.get(key) == value for key, value in expected.items()):
+            raise ValueError("saved result is not acceptance; use a new result ID and path")
+        raise ValueError("result identity or content conflicts with the request")
+    if exists and not repair_unaccepted:
+        raise ValueError("malformed result requires caller confirmation that it was never accepted: --repair-unaccepted-result")
+    running = {**expected, "status": "running", "exit_code": None}
+    if execution is not None:
+        running["execution"] = execution
+    write_result(path, running, exclusive=not exists)
+    return False
+
+
+def add_result_arguments(parser: argparse.ArgumentParser) -> None:
+    """Expose completed 1e.3's caller-owned identity and final-path interface."""
+    parser.add_argument("--result-file", type=pathlib.Path, help="Operation-owned final JSON file.")
+    for field in IDENTITY_FIELDS:
+        parser.add_argument("--" + field.replace("_", "-"))
+    parser.add_argument("--describe-test-results", action="store_true", help="Print the supported result contract.")
+    parser.add_argument("--repair-unaccepted-result", action="store_true", help="Caller confirms a malformed owned result was never accepted.")
+    parser.add_argument("--probe-command", help="JSON argv for a controlled compatibility probe; uses the actual result writer.")
+
+
+def describe_result_contract() -> None:
+    print(json.dumps({"schema": CONTRACT_SCHEMA, "result_schema": CHECK_RESULT_SCHEMA}, sort_keys=True))
+
+
+def check_result_context(check_version: str) -> dict[str, Any] | None:
+    """Read authoritative scheduling inputs; absent historical scope stays absent."""
+    raw = os.environ.get(CHECK_CONTEXT_ENV)
+    if raw is None:
+        return None
+    context = json.loads(raw, object_pairs_hook=_object, parse_constant=_nonfinite)
+    fields = {
+        "schema", "group", "scope", "qualificationLevel", "workVersion", "checkVersion",
+        "productInputs", "checkInputs", "arguments", "dependencies", "environment", "fingerprint",
+    }
+    if (not isinstance(context, dict) or set(context) != fields
+            or context["schema"] != CHECK_CONTEXT_SCHEMA
+            or not isinstance(context["qualificationLevel"], str)
+            or context["qualificationLevel"] not in {"alpha", "beta", "rc", "final"}
+            or context["checkVersion"] != check_version
+            or not all(isinstance(context[key], str) and context[key].strip()
+                       for key in ("group", "workVersion", "checkVersion"))
+            or not isinstance(context["scope"], dict)
+            or not all(isinstance(context[key], dict)
+                       for key in ("productInputs", "checkInputs", "dependencies", "environment"))
+            or not isinstance(context["arguments"], list)
+            or not all(isinstance(item, str) for item in context["arguments"])
+            or not isinstance(context["fingerprint"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", context["fingerprint"]) is None):
+        raise ValueError("repository check context is incomplete or conflicts with the requested check version")
+    canonical(context)
+    return context
+
+
+def _check_file_digest(root: pathlib.Path, name: str) -> str | None:
+    path = root / name
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("repository check input escapes the checkout")
+    if not path.exists():
+        return None
+    if path.is_symlink() or path.is_junction() or not path.is_file():
+        raise ValueError("repository check input must be a regular owned file")
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _check_inventory(root: pathlib.Path, patterns: list[str], files: list[str]) -> dict[str, Any]:
+    def matches(name: str, pattern: str) -> bool:
+        return fnmatch.fnmatchcase(name, pattern) or (
+            pattern.startswith("**/") and fnmatch.fnmatchcase(name, pattern[3:]))
+    names = {name for name in files if any(matches(name, rule) for rule in patterns)}
+    names.update(rule for rule in patterns if not any(char in rule for char in "*?["))
+    return {name: _check_file_digest(root, name) for name in sorted(names)}
+
+
+def _check_environment_value(value: str | None, root: pathlib.Path) -> str | None:
+    """Keep owned checkout relocation out of declared environment identities."""
+    if value is None:
+        return None
+    resolved = str(root.resolve())
+    prefixes = sorted({resolved, resolved.replace("\\", "/"), resolved.replace("/", "\\")},
+                      key=len, reverse=True)
+    pattern = "(?:" + "|".join(re.escape(prefix) for prefix in prefixes) + r")(?=[\\/;:]|$)"
+    flags = re.IGNORECASE if os.name == "nt" else 0
+    return re.sub(pattern, lambda _match: "${REPO_ROOT}", value, flags=flags)
+
+
+def _check_environment_file(value: str | None, root: pathlib.Path) -> str | None:
+    """Bind the explicitly declared event-file pointer to its current bytes."""
+    if not value:
+        return None
+    path = pathlib.Path(value)
+    path = path if path.is_absolute() else root / path
+    if not path.exists():
+        return None
+    path = path.resolve(strict=True)
+    if not path.is_file():
+        raise ValueError("declared environment file must be a regular file")
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def check_current_inputs(context: Mapping[str, Any], root: pathlib.Path) -> None:
+    """Reject edits, new/deleted owned files and execution-scope drift.
+
+    These are integrity/input comparisons, never a second execution of accepted
+    checks. Both boundaries use the existing operation declaration, not another
+    dependency graph. A check that changes its own declared inputs cannot pass.
+    """
+    rules = context["scope"].get("inputRules")
+    if (not isinstance(rules, dict)
+            or not all(isinstance(rules.get(key), list) and rules[key]
+                       and all(isinstance(item, str) and item for item in rules[key])
+                       for key in ("product-inputs", "check-inputs"))):
+        raise ValueError("repository check input ownership is incomplete")
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root, capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        raise ValueError("cannot inspect repository check input inventory")
+    files = sorted(set(result.stdout.split("\0")) - {""})
+    for field, key in (("productInputs", "product-inputs"), ("checkInputs", "check-inputs")):
+        if _check_inventory(root, rules[key], files) != context[field]:
+            raise ValueError("repository check " + field + " changed before completion")
+    dependencies = {name: _check_file_digest(root, name) for name in rules.get("dependencies", [])}
+    if dependencies != context["dependencies"] or any(value is None for value in dependencies.values()):
+        raise ValueError("repository check dependencies changed before completion")
+    recorded = context["environment"]
+    variables = {
+        name: hashlib.sha256(canonical(_check_environment_value(os.environ.get(name), root))).hexdigest()
+        for name in rules.get("environment", [])
+    }
+    if (recorded.get("variables") != variables or recorded.get("platform") != platform.system()
+            or recorded.get("architecture") != platform.machine()):
+        raise ValueError("repository check environment changed before completion")
+    if "files" in recorded:
+        environment_files = {
+            name: _check_environment_file(os.environ.get(name), root)
+            for name in rules.get("environment", []) if name == "GITHUB_EVENT_PATH"
+        }
+        if environment_files != recorded["files"]:
+            raise ValueError("repository check environment file changed before completion")
+    tools: dict[str, dict[str, str | None]] = {}
+    for name in rules.get("tools", []):
+        expanded = re.sub(r"\$\{([^}]+)\}", lambda match: os.environ.get(match[1], ""), name)
+        path: pathlib.Path | None
+        if "/" in expanded or "\\" in expanded:
+            path = pathlib.Path(expanded)
+            path = path if path.is_absolute() else root / path
+        else:
+            found = shutil.which(expanded)
+            path = pathlib.Path(found) if found else None
+        if path is not None and not path.exists():
+            path = None
+        if path is not None:
+            path = path.resolve(strict=True)
+        if path is not None and (path.is_symlink() or path.is_junction() or not path.is_file()):
+            raise ValueError("repository check tool must be a regular file")
+        tools[name] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path is not None else None}
+    if recorded.get("tools") != tools:
+        raise ValueError("repository check tools changed before completion")
+    if recorded.get("runtime"):
+        runtime = {
+            "python": platform.python_version(), "implementation": platform.python_implementation(),
+            "packages": sorted(
+                [dist.metadata["Name"].lower(), dist.version]
+                for dist in importlib.metadata.distributions()
+            ),
+        }
+        if runtime != recorded["runtime"]:
+            raise ValueError("repository check locked runtime differs from the selected runtime")
+
+
+def run_recorded_check(
+    callback: Callable[[], int], args: argparse.Namespace, invocation: Mapping[str, Any],
+    *, checks: Callable[[], Any] | None = None, repo_root: pathlib.Path | None = None,
+) -> int:
+    """Write actual runner outcomes before success and preserve original attempts.
+
+    The shared operation owner allocates identity, inputs, path and retention;
+    this producer never invents acceptance from Git metadata or another runner.
+    Without result arguments the existing disposable invocation is preserved.
+    """
+    supplied = [getattr(args, "result_file", None) is not None,
+                *(getattr(args, field, None) is not None for field in IDENTITY_FIELDS)]
+    if not any(supplied):
+        if getattr(args, "repair_unaccepted_result", False) or getattr(args, "probe_command", None):
+            print("repair-unaccepted-result and probe-command require result arguments", file=sys.stderr)
+            return 2
+        return callback()
+    path: pathlib.Path | None = None
+    try:
+        if not all(supplied):
+            raise ValueError("result-file, result-id, candidate-id, check-id and check-version must be supplied together")
+        if any(not getattr(args, field).strip() for field in IDENTITY_FIELDS):
+            raise ValueError("result identities must not be empty")
+        context = check_result_context(args.check_version)
+        expected = {
+            "schema": CHECK_RESULT_SCHEMA,
+            **{field: getattr(args, field) for field in IDENTITY_FIELDS},
+            "invocation": dict(invocation),
+        }
+        started = datetime.datetime.now(datetime.UTC)
+        monotonic_start = time.monotonic()
+        execution = {
+            "startedAt": started.isoformat(), "finishedAt": None,
+            "durationSeconds": None, "workerPid": os.getpid(),
+        } if context is not None else None
+        if context is not None:
+            expected["inputs"] = context
+        root = (repo_root or pathlib.Path.cwd()).resolve()
+        if context is not None:
+            check_current_inputs(context, root)
+        path = result_path(args.result_file)
+        prepare: dict[str, Any] = {"repair_unaccepted": getattr(args, "repair_unaccepted_result", False)}
+        if execution is not None:
+            prepare["execution"] = execution
+        if prepare_result(path, expected, **prepare):
+            print("OK")
+            return 0
+        running = {**expected, "status": "running", "exit_code": None}
+        if execution is not None:
+            running["execution"] = execution
+        failure: BaseException | None = None
+        try:
+            if context is not None:
+                check_current_inputs(context, root)
+            code = callback()
+            if context is not None:
+                check_current_inputs(context, root)
+            if type(code) is not int:
+                raise ValueError("check callback must return an integer exit code")
+            code = code if code >= 0 else 1
+            status = "passed" if code == 0 else "failed"
+        except KeyboardInterrupt:
+            code, status = 130, "interrupted"
+        except SystemExit as exc:
+            code = exc.code if type(exc.code) is int else (0 if exc.code is None else 1)
+            code = code if code >= 0 else 1
+            status = "passed" if code == 0 else "failed"
+        except BaseException as exc:
+            code, status, failure = 1, "failed", exc
+        completed = {**expected, "status": status, "exit_code": code}
+        if execution is not None:
+            completed["execution"] = {
+                **execution, "finishedAt": datetime.datetime.now(datetime.UTC).isoformat(),
+                "durationSeconds": max(0.0, time.monotonic() - monotonic_start),
+            }
+        if checks is not None:
+            completed["checks"] = checks()
+        if read_result(path)[1] != running:
+            raise ValueError("running result changed; refusing to overwrite it")
+        write_result(path, completed, exclusive=False)
+        if failure is not None:
+            raise failure
+        return code
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def execution_profile(suite: str) -> str:
+    """Keep CI acceptance distinct from the mandatory local desktop outcome."""
+    if suite == "installer":
+        return "installer"
+    if os.environ.get("CI"):
+        return "ci"
+    if platform.system() != "Windows":
+        raise ValueError("Local repository tests require a signed-in Windows desktop.")
+    return "desktop"
+
+
+def task_temp_root() -> pathlib.Path:
+    """Resolve the caller's scratch scope or the current checkout's group."""
+    selected = os.environ.get("CERATOPS_TASK_TEMP_ROOT")
+    if selected:
+        return pathlib.Path(selected).absolute()
+    command = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise ValueError(child_failure(command, result.returncode, result.stdout, result.stderr))
+    primary = pathlib.Path(result.stdout.strip()).parent
+    return primary.parent / "tmp" / primary.name / ROOT.name
+
+
+def child_failure(command: list[str], status: int | str, stdout: str, stderr: str) -> str:
+    """Keep the exact runtime/argv, exit status and both streams on failure."""
+    return (f"Command: {json.dumps(command)}\nExit status: {status}\n"
+            f"stdout:\n{stdout or '<absent>'}\nstderr:\n{stderr or '<absent>'}")
+
+
+def test_commands(
+    args: argparse.Namespace, targets: list[str], temporary: pathlib.Path,
+) -> list[tuple[str, list[str]]]:
+    """Own framework and desktop task selection for both CI and local SDLC."""
+    if args.probe_command is not None:
+        return [("compatibility-probe", args.probe_command)]
+    if args.suite == "installer":
+        for target in targets:
+            path = (ROOT / target.split("::", 1)[0]).resolve()
+            if not path.is_relative_to(ROOT) or not path.exists():
+                raise ValueError(f"test target must exist inside this repository: {target}")
+        return [("installer", [
+            sys.executable, "-m", "pytest", *targets, *without_basetemp(args.pytest_arg),
+            "-p", "no:cacheprovider", "-o", "tmp_path_retention_count=3",
+        ])]
+    powershell = shutil.which("pwsh")
+    if powershell is None:
+        raise ValueError("Repository tests require PowerShell Core (pwsh), declared in SDLC.")
+    commands = [("updater", [
+        powershell, "-NoProfile", "-NonInteractive", "-File",
+        str(ROOT / "Tests/Test-AppUpdates.ps1"), "-TempRoot", str(temporary),
+    ])]
+    if args.profile == "desktop":
+        commands.extend((name, [str(ROOT / "CeratopsKeyboardLayout.exe"),
+                               "/ErrorStdOut=UTF-8", str(ROOT / path), *options])
+                        for name, path, options in DESKTOP_TESTS)
+    return commands
+
+
+def execute_check(
+    args: argparse.Namespace, targets: list[str], inherited: list[str], checks: list[dict[str, Any]],
+) -> int:
+    """Stop at the first failed effect and retain each actual suite outcome."""
+    temporary = task_temp_root()
+    commands = test_commands(args, targets, temporary)
+    temporary.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    environment.pop(CHECK_CONTEXT_ENV, None)
+    environment.pop("PYTHONPYCACHEPREFIX", None)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTEST_DEBUG_TEMPROOT"] = str(temporary)
+    environment["PYTEST_ADDOPTS"] = shlex.join(inherited)
+    for name, command in commands:
+        try:
+            result = subprocess.run(command, cwd=ROOT, env=environment, check=False,
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace")
+            code = result.returncode if result.returncode >= 0 else 1
+        except KeyboardInterrupt:
+            checks.append({"name": name, "status": "interrupted", "exit_code": 130})
+            print(child_failure(command, "interrupted", "", ""), file=sys.stderr)
+            raise
+        except OSError as error:
+            code = 127
+            result = subprocess.CompletedProcess(command, code, "", f"{type(error).__name__}: {error}")
+        checks.append({"name": name, "status": "passed" if code == 0 else "failed", "exit_code": code})
+        if code:
+            print(child_failure(command, result.returncode, result.stdout, result.stderr), file=sys.stderr)
+            return code
+    if args.profile == "ci":
+        checks.append({"name": "desktop-interaction", "status": "not_applicable",
+                       "reason": "Interactive Windows suites run locally before release."})
+    print("OK")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("targets", nargs="*", help="Repository-relative test files or directories.")
+    parser.add_argument("--suite", choices=("repository", "installer"), default="repository")
+    parser.add_argument("--pytest-arg", action="append", default=[], help="Repeat using --pytest-arg=VALUE.")
+    add_result_arguments(parser)
+    args = parser.parse_args(argv)
+    if args.describe_test_results:
+        describe_result_contract()
+        return 0
+    try:
+        if args.probe_command is not None:
+            args.probe_command = json.loads(args.probe_command)
+            if (not isinstance(args.probe_command, list) or not args.probe_command
+                    or any(not isinstance(item, str) or "\0" in item for item in args.probe_command)
+                    or not args.probe_command[0]):
+                raise ValueError("probe-command must be a nonempty JSON argv")
+        inherited = without_basetemp(shlex.split(os.environ.get("PYTEST_ADDOPTS", "")))
+        targets = args.targets or DEFAULT_TARGETS
+        if args.suite != "installer" and (args.targets or args.pytest_arg):
+            raise ValueError("Python test targets and pytest arguments require --suite installer.")
+        args.profile = "probe" if args.probe_command else execution_profile(args.suite)
+        invocation = {
+            "targets": targets if args.suite == "installer" and not args.probe_command else [],
+            "pytest_args": [] if args.probe_command else without_basetemp(args.pytest_arg),
+            "pytest_addopts": [] if args.probe_command else inherited,
+            "probe_command": args.probe_command,
+        }
+        # Compatibility probes use the unextended shared protocol. Actual test
+        # receipts also bind their selected suite and CI/desktop scope.
+        if args.probe_command is None:
+            invocation.update({"suite": args.suite, "profile": args.profile})
+        checks: list[dict[str, Any]] = []
+        return run_recorded_check(lambda: execute_check(args, targets, inherited, checks), args, invocation,
+                                  checks=(lambda: checks) if args.probe_command is None else None, repo_root=ROOT)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
