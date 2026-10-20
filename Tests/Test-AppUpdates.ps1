@@ -660,11 +660,13 @@ ExitApp(code = 12 ? 7 : 0)
             $runtime = Join-Path $repositoryRoot 'CeratopsKeyboardLayout.exe'
             $appScript = Join-Path $repositoryRoot 'CeratopsKeyboardLayout.ahk'
             $probeScript = Join-Path $testRoot '_single-instance-probe.ahk'
-            $ready = Join-Path $testRoot '_single-instance-ready'
+            $ready = Join-Path $testRoot '_single-instance-ready-'
             [IO.File]::WriteAllText($probeScript, (@'
 #Requires AutoHotkey v2.0.19+
 #Include {0}
-FileAppend(DllCall("GetCurrentProcessId", "UInt") "`n", A_Args[1])
+marker := A_Args[1] DllCall("GetCurrentProcessId", "UInt")
+FileAppend(DllCall("GetCurrentProcessId", "UInt") "`n", marker ".tmp")
+FileMove(marker ".tmp", marker ".done")
 Sleep(30000)
 '@ -f $appScript))
             $arguments = '/ErrorStdOut=UTF-8 "{0}" "{1}"' -f $probeScript, $ready
@@ -672,12 +674,15 @@ Sleep(30000)
             try {
                 $first = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
                 $workers.Add($first)
+                # Each child publishes its own marker only after closing the file.
+                # Readers never open the live writer's file or a partial record.
+                $firstReady = '{0}{1}.done' -f $ready, $first.Id
                 $deadline = [Diagnostics.Stopwatch]::StartNew()
-                while ((-not [IO.File]::Exists($ready)) -and $deadline.Elapsed.TotalSeconds -lt 10) {
+                while ((-not [IO.File]::Exists($firstReady)) -and $deadline.Elapsed.TotalSeconds -lt 10) {
                     [Threading.Thread]::Sleep(25)
                 }
-                Assert-Equal ([IO.File]::Exists($ready)) $true 'First companion started'
-                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 1 'First companion reached its body'
+                Assert-Equal ([IO.File]::Exists($firstReady)) $true 'First companion started'
+                Assert-Equal ([IO.File]::ReadAllLines($firstReady).Length) 1 'First companion reached its body'
 
                 foreach ($attempt in 1..2) {
                     $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
@@ -685,7 +690,7 @@ Sleep(30000)
                     Assert-Equal ($duplicate.WaitForExit(10000)) $true "Duplicate $attempt exited"
                     $first.Refresh()
                     Assert-Equal $first.HasExited $false "Duplicate $attempt preserved the first companion"
-                    Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 1 "Duplicate $attempt skipped startup"
+                    Assert-Equal ([IO.Directory]::GetFiles($testRoot, '_single-instance-ready-*.done').Length) 1 "Duplicate $attempt skipped startup"
                 }
 
                 # Recovery is tested through the service owner's exact-path kill
@@ -693,11 +698,13 @@ Sleep(30000)
                 $first.Kill(); $first.WaitForExit()
                 $replacement = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
                 $workers.Add($replacement)
+                $replacementReady = '{0}{1}.done' -f $ready, $replacement.Id
                 $deadline.Restart()
-                while ([IO.File]::ReadAllLines($ready).Length -lt 2 -and $deadline.Elapsed.TotalSeconds -lt 10) {
+                while ((-not [IO.File]::Exists($replacementReady)) -and $deadline.Elapsed.TotalSeconds -lt 10) {
                     [Threading.Thread]::Sleep(25)
                 }
-                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 2 'Fresh companion started after interruption'
+                Assert-Equal ([IO.File]::Exists($replacementReady)) $true 'Fresh companion started after interruption'
+                Assert-Equal ([IO.File]::ReadAllLines($replacementReady).Length) 1 'Fresh companion reached its body'
                 $replacement.Refresh()
                 Assert-Equal $replacement.HasExited $false 'Fresh companion remains active'
                 $duplicate = Start-Process -FilePath $runtime -ArgumentList $arguments -WindowStyle Hidden -PassThru
@@ -705,7 +712,7 @@ Sleep(30000)
                 Assert-Equal ($duplicate.WaitForExit(10000)) $true 'Fresh companion rejects a repeat launch'
                 $replacement.Refresh()
                 Assert-Equal $replacement.HasExited $false 'Repeat launch preserves fresh companion'
-                Assert-Equal ([IO.File]::ReadAllLines($ready).Length) 2 'Repeat launch skipped startup'
+                Assert-Equal ([IO.Directory]::GetFiles($testRoot, '_single-instance-ready-*.done').Length) 2 'Repeat launch skipped startup'
             } finally {
                 foreach ($worker in $workers) {
                     $worker.Refresh()
