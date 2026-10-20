@@ -330,4 +330,3 @@ ReportAppLogFailure(failure) {
         "UInt", 0, "Ptr", 0, "UShort", 1, "UInt", 0, "Ptr", strings, "Ptr", 0)
     finally DllCall("advapi32\DeregisterEventSource", "Ptr", source)
 }
-
