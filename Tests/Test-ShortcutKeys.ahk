@@ -1,5 +1,6 @@
 ﻿#Requires AutoHotkey v2.0.19+
 #Include ..\CeratopsKeyboardLayout.ahk
+#Include ..\CeratopsKeyboardLayout-Service.ahk
 ; Popup observers are separate workers of this same test file. Each owns a
 ; PID-specific temp root and must not terminate the parent test process.
 #SingleInstance Off
@@ -27,6 +28,570 @@ class NoInstalledLayouts extends KeyboardConverter {
     __New() => super.__New([])
     ReadInstalledLayoutHandles() => []
 }
+class CompanionStopProbe {
+    __New(boundary := "") {
+        this.Boundary := boundary, this.Running := true, this.Closed := false
+        this.Stuck := false
+    }
+    Wait(handle, milliseconds) => this.Stuck || this.Running ? 0x102 : 0
+    Terminate(handle) {
+        if this.Boundary = "before"
+            throw Error("stop-test-interruption")
+        this.Running := false
+        if this.Boundary = "after"
+            throw Error("stop-test-interruption")
+    }
+    Close(handle) => this.Closed := true
+}
+
+class DailyUpdateProbe {
+    __New(effect := "", boundary := "") {
+        this.Effect := effect, this.Boundary := boundary, this.Due := "", this.Launches := 0, this.Busy := false
+    }
+    ReadNextCheck() => this.Due
+    InstallationIsBusy() => this.Busy
+    At(effect, boundary) {
+        if this.Effect = effect && this.Boundary = boundary
+            throw Error("daily-update-test-interruption")
+    }
+    SaveNextCheck(value) {
+        this.At("schedule", "before")
+        this.Due := value
+        this.At("schedule", "after")
+    }
+    Launch() {
+        this.At("launch", "before")
+        this.Launches += 1
+        this.At("launch", "after")
+    }
+}
+
+RequireUnlockedTrayDesktop() {
+    ; Use the session's lock state rather than racing an ephemeral LockApp HWND.
+    session := 0, information := 0, size := 0
+    if !DllCall("ProcessIdToSessionId", "UInt", DllCall("GetCurrentProcessId", "UInt"), "UInt*", &session)
+        || !DllCall("wtsapi32\WTSQuerySessionInformationW", "Ptr", 0, "UInt", session,
+            "Int", 25, "Ptr*", &information, "UInt*", &size)
+        throw OSError()
+    try {
+        ; WTSINFOEXW level 1: Data begins at byte 8; SessionFlags is byte 16.
+        if size < 20 || NumGet(information, 0, "UInt") != 1
+            throw Error("Windows did not expose a usable session lock state")
+        if NumGet(information, 16, "UInt") = 0
+            throw Error("Windows is locked; unlock the desktop for the physical hover check", , "LOCKED")
+        if NumGet(information, 16, "UInt") != 1
+            throw Error("Windows returned an unknown session lock state")
+    } finally DllCall("wtsapi32\WTSFreeMemory", "Ptr", information)
+    tray := WinExist("ahk_class Shell_TrayWnd")
+    if !tray
+        throw Error("Windows has no accessible taskbar")
+    return tray
+}
+
+CaptureTrayHover(path, x, y) {
+    ; Capture only the tray region, including layered tooltip windows. All GDI
+    ; handles belong to this test; the caller owns the one temporary PNG.
+    x := Max(SysGet(76), x - 180), y := Max(SysGet(77), y - 180)
+    width := 360, height := 240, token := 0, bitmap := 0, picture := 0, memory := 0
+    ; Keep GDI+ loaded until every image and its startup token are released.
+    graphicsModule := DllCall("LoadLibraryW", "Str", "gdiplus.dll", "Ptr")
+    if !graphicsModule
+        throw OSError()
+    desktop := DllCall("GetDC", "Ptr", 0, "Ptr")
+    try {
+        memory := DllCall("gdi32\CreateCompatibleDC", "Ptr", desktop, "Ptr")
+        bitmap := DllCall("gdi32\CreateCompatibleBitmap", "Ptr", desktop, "Int", width, "Int", height, "Ptr")
+        if !desktop || !memory || !bitmap
+            throw OSError()
+        previous := DllCall("gdi32\SelectObject", "Ptr", memory, "Ptr", bitmap, "Ptr")
+        if !DllCall("gdi32\BitBlt", "Ptr", memory, "Int", 0, "Int", 0, "Int", width,
+            "Int", height, "Ptr", desktop, "Int", x, "Int", y, "UInt", 0x40CC0020)
+            throw OSError()
+        DllCall("gdi32\SelectObject", "Ptr", memory, "Ptr", previous)
+        input := Buffer(24, 0), encoder := Buffer(16, 0)
+        NumPut("UInt", 1, input)
+        status := DllCall("gdiplus\GdiplusStartup", "Ptr*", &token, "Ptr", input, "Ptr", 0)
+        if status
+            throw Error("GdiplusStartup failed: " status)
+        status := DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "Ptr", bitmap, "Ptr", 0, "Ptr*", &picture)
+        if status
+            throw Error("GdipCreateBitmapFromHBITMAP failed: " status)
+        DllCall("ole32\CLSIDFromString", "Str", "{557CF406-1A04-11D3-9A73-0000F81EF32E}", "Ptr", encoder)
+        status := DllCall("gdiplus\GdipSaveImageToFile", "Ptr", picture, "Str", path, "Ptr", encoder, "Ptr", 0)
+        if status
+            throw Error("GdipSaveImageToFile failed: " status " target=" path)
+    } finally {
+        if picture
+            DllCall("gdiplus\GdipDisposeImage", "Ptr", picture)
+        if token
+            DllCall("gdiplus\GdiplusShutdown", "Ptr", token)
+        if bitmap
+            DllCall("gdi32\DeleteObject", "Ptr", bitmap)
+        if memory
+            DllCall("gdi32\DeleteDC", "Ptr", memory)
+        if desktop
+            DllCall("ReleaseDC", "Ptr", 0, "Ptr", desktop)
+        DllCall("FreeLibrary", "Ptr", graphicsModule)
+    }
+}
+
+CheckPhysicalTrayHover(root) {
+    DllCall("SetThreadDpiAwarenessContext", "Ptr", -4, "Ptr")
+    if FileExist(root "\_tray-hover.png")
+        FileDelete(root "\_tray-hover.png")
+    tray := RequireUnlockedTrayDesktop()
+    CoordMode("Mouse", "Screen")
+    MouseGetPos(&originalX, &originalY)
+    opened := false, chevron := 0
+    try {
+        A_IconTip := "" ; Reproduce the former empty-tooltip input to the shell.
+        InitializeAppTray(GetServiceAppDirectory() "\CeratopsKeyboardLayout.ico")
+        ; This fixture creates only its own tray icon, without global shortcuts,
+        ; shared settings, update workers or changes to the installed service.
+        hoverManager := KeyboardShortcutManager(Converter, KeyboardShortcutSettings(root "\_hover-shortcuts.ini"))
+        hoverManager.RebuildTray()
+        if !WinExist("ahk_class TopLevelWindowForOverflowXamlIsland") {
+            trayElement := UIA.ElementFromHandle(tray)
+            try chevron := trayElement.FindElement({Name: "Show Hidden Icons", AutomationId: "SystemTrayIcon"})
+            catch Error as failure
+                throw Error("Tray overflow control unavailable: " failure.Message "`n" trayElement.DumpAll(" ", 6))
+            chevron.InvokePattern.Invoke()
+            opened := true
+            Sleep(300)
+        }
+        identifier := Buffer(40, 0), rectangle := Buffer(16, 0)
+        NumPut("UInt", 40, identifier)
+        NumPut("Ptr", A_ScriptHwnd, identifier, 8)
+        NumPut("UInt", 0x404, identifier, 16)
+        if DllCall("Shell32\Shell_NotifyIconGetRect", "Ptr", identifier, "Ptr", rectangle, "Int")
+            throw Error("Windows did not expose the candidate tray icon rectangle")
+        x := (NumGet(rectangle, 0, "Int") + NumGet(rectangle, 8, "Int")) // 2
+        y := (NumGet(rectangle, 4, "Int") + NumGet(rectangle, 12, "Int")) // 2
+        RequireUnlockedTrayDesktop()
+        cover := DllCall("WindowFromPoint", "Int64", (x & 0xFFFFFFFF) | (y << 32), "Ptr")
+        surface := DllCall("GetAncestor", "Ptr", cover, "UInt", 2, "Ptr")
+        overflow := WinExist("ahk_class TopLevelWindowForOverflowXamlIsland")
+        if surface != tray && (!overflow || surface != overflow)
+            throw Error("The candidate tray icon is not physically visible")
+        MouseMove(x, y, 0)
+        Sleep(1600)
+        RequireUnlockedTrayDesktop()
+        CaptureTrayHover(root "\_tray-hover.png", x, y)
+        for tooltip in WinGetList("ahk_class tooltips_class32") {
+            if !DllCall("IsWindowVisible", "Ptr", tooltip)
+                continue
+            WinGetPos(&tx, &ty, &tw, &th, "ahk_id " tooltip)
+            if Abs(tx - x) < 180 && Abs(ty - y) < 180
+                throw Error("A visible tooltip appeared while hovering over the candidate icon")
+        }
+    } finally {
+        A_IconHidden := true
+        try {
+            RequireUnlockedTrayDesktop()
+            if opened
+                chevron.InvokePattern.Invoke()
+            MouseMove(originalX, originalY, 0)
+        }
+    }
+}
+
+CheckDailyAutomaticUpdates() {
+    global ServiceStopRequested
+    now := "20261020120000"
+    for effect in ["schedule", "launch"] {
+        for boundary in ["before", "after"] {
+            probe := DailyUpdateProbe(effect, boundary), interrupted := false
+            try StartDailyAppUpdateIfDue(now, probe)
+            catch Error as failure {
+                if failure.Message != "daily-update-test-interruption"
+                    throw failure
+                interrupted := true
+            }
+            if !interrupted
+                throw Error("The daily update boundary did not interrupt")
+            probe.Boundary := ""
+            StartDailyAppUpdateIfDue(now, probe)
+            StartDailyAppUpdateIfDue(now, probe)
+            expected := effect = "schedule" && boundary = "before"
+                || effect = "launch" && boundary = "after" ? 1 : 0
+            if probe.Launches != expected || probe.Due != "20261021120000"
+                throw Error("A daily attempt was repeated or its failure schedule was lost")
+            StartDailyAppUpdateIfDue("20261025120000", probe)
+            if probe.Launches != expected + 1 || probe.Due != "20261026120000"
+                throw Error("A resumed service did not launch exactly one overdue check")
+        }
+    }
+    probe := DailyUpdateProbe()
+    StartDailyAppUpdateIfDue("20280228120000", probe)
+    if probe.Due != "20280229120000"
+        throw Error("The daily check did not preserve a leap-day schedule")
+    probe := DailyUpdateProbe(), probe.Busy := true
+    StartDailyAppUpdateIfDue(now, probe)
+    if probe.Due != "" || probe.Launches
+        throw Error("The service checked for updates before setup finished")
+    probe.Busy := false
+    StartDailyAppUpdateIfDue(, probe)
+    if DateDiff(probe.Due, A_NowUTC, "Seconds") < 86395
+        throw Error("The real service entry did not schedule its next day using current UTC")
+    oldStopRequest := ServiceStopRequested
+    ServiceStopRequested := true, stopped := false
+    try {
+        try DailyAppUpdateOperations().Launch()
+        catch Error as failure
+            stopped := InStr(failure.Message, "service is stopping")
+        if !stopped
+            throw Error("A stopped service launched a daily update worker")
+    } finally ServiceStopRequested := oldStopRequest
+    if !ServiceInstallNeedsDesktopProbe("", [])
+        || ServiceInstallNeedsDesktopProbe("owned installation", [])
+        || !ServiceInstallNeedsDesktopProbe("owned installation", [1])
+        throw Error("An unattended upgrade lost its existing service or a fresh install skipped its probe")
+}
+
+CheckCompanionShutdown() {
+    global CompanionProcesses
+    for boundary in ["before", "after"] {
+        probe := CompanionStopProbe(boundary)
+        CompanionProcesses[77] := 123
+        failureSeen := false
+        try StopCompanions(probe.Wait.Bind(probe), probe.Terminate.Bind(probe),
+            probe.Close.Bind(probe))
+        catch Error as failure {
+            failureSeen := true
+            if boundary != "before" || !InStr(failure.Message, "session 77")
+                throw failure
+        }
+        if boundary = "before" && !failureSeen
+            throw Error("An interrupted shutdown did not report its failure")
+        if boundary = "before" && (!probe.Running || !CompanionProcesses.Has(77))
+            throw Error("An interrupted shutdown lost its live companion handle")
+        probe.Boundary := ""
+        StopCompanions(probe.Wait.Bind(probe), probe.Terminate.Bind(probe),
+            probe.Close.Bind(probe))
+        if probe.Running || !probe.Closed || CompanionProcesses.Has(77)
+            throw Error("A fresh shutdown did not finish the owned companion")
+    }
+    probe := CompanionStopProbe()
+    probe.Stuck := true
+    CompanionProcesses[77] := 123
+    failureSeen := false
+    try StopCompanions(probe.Wait.Bind(probe), probe.Terminate.Bind(probe),
+        probe.Close.Bind(probe))
+    catch Error as failure {
+        failureSeen := true
+        if !InStr(failure.Message, "session 77") || failure.Extra != 1460
+            throw failure
+    }
+    if !failureSeen || !CompanionProcesses.Has(77)
+        throw Error("A timed-out shutdown did not retain and report its failure")
+    probe.Stuck := false
+    StopCompanions(probe.Wait.Bind(probe), probe.Terminate.Bind(probe),
+        probe.Close.Bind(probe))
+    if CompanionProcesses.Count || !probe.Closed
+        throw Error("A repeated shutdown left a companion handle open")
+
+    child := 0
+    try {
+        Run('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
+            . ' -NoProfile -NonInteractive -Command Start-Sleep -Seconds 30', , "Hide", &child)
+        handle := DllCall("kernel32\OpenProcess", "UInt", 0x100001,
+            "Int", false, "UInt", child, "Ptr")
+        if !handle
+            throw OSError()
+        CompanionProcesses[77] := handle
+        StopCompanions()
+        if ProcessExist(child)
+            throw Error("Shutdown returned before the owned process exited")
+    } finally {
+        if child && ProcessExist(child)
+            ProcessClose(child)
+        if CompanionProcesses.Has(77) {
+            DllCall("kernel32\CloseHandle", "Ptr", CompanionProcesses[77])
+            CompanionProcesses.Delete(77)
+        }
+    }
+}
+class RestartOperationProbe {
+    __New(effect, boundary) {
+        this.Effect := effect, this.Boundary := boundary
+        this.Running := true, this.Tray := true, this.Locked := false
+    }
+    Acquire() => this.Locked := true
+    Release(lock) => this.Locked := false
+    Open() => this
+    Close(target) => 0
+    Before(effect) {
+        if this.Effect = effect && this.Boundary = "before"
+            throw Error("restart-test-interruption")
+    }
+    After(effect) {
+        if this.Effect = effect && this.Boundary = "after"
+            throw Error("restart-test-interruption")
+    }
+    Stop(target) {
+        if !this.Running
+            return
+        this.Before("stop")
+        this.Running := false
+        this.After("stop")
+    }
+    StopProcesses() {
+        if !this.Tray
+            return
+        this.Before("kill")
+        this.Tray := false
+        this.After("kill")
+    }
+    Start(target) {
+        if this.Running
+            return
+        this.Before("start")
+        this.Running := true, this.Tray := true
+        this.After("start")
+    }
+}
+
+CheckForceRestartTransitions() {
+    for effect in ["stop", "kill", "start"] {
+        for boundary in ["before", "after"] {
+            probe := RestartOperationProbe(effect, boundary)
+            interrupted := false
+            try ForceRestartOwnedService(probe)
+            catch Error as failure {
+                if !InStr(failure.Message, "restart-test-interruption")
+                    || !InStr(failure.Message, "Force restart failed while")
+                    throw failure
+                interrupted := true
+            }
+            if !interrupted || probe.Locked
+                throw Error("Restart did not report an interruption and release its worker lock")
+            probe.Boundary := ""
+            ForceRestartOwnedService(probe)
+            ForceRestartOwnedService(probe)
+            if !probe.Running || !probe.Tray || probe.Locked
+                throw Error("A fresh repeated restart did not leave one running service and tray")
+        }
+    }
+    ; Upgrades use the same stop/kill path, but replacement starts only after
+    ; setup copies the new files. Fresh calls must remain stopped after failure.
+    for effect in ["stop", "kill"] {
+        for boundary in ["before", "after"] {
+            probe := RestartOperationProbe(effect, boundary)
+            interrupted := false
+            try PrepareOwnedAppUpgrade(probe)
+            catch Error as failure {
+                if !InStr(failure.Message, "Upgrade preparation failed while")
+                    throw failure
+                interrupted := true
+            }
+            if !interrupted || probe.Locked
+                throw Error("Upgrade preparation lost its interruption or lock release")
+            probe.Boundary := ""
+            PrepareOwnedAppUpgrade(probe)
+            PrepareOwnedAppUpgrade(probe)
+            if probe.Running || probe.Tray || probe.Locked
+                throw Error("Upgrade preparation restarted an old process before file replacement")
+        }
+    }
+}
+
+class LogInterruptionProbe {
+    __New(effect, boundary) {
+        this.Effect := effect, this.Boundary := boundary, this.Seen := false
+    }
+    Observe(effect, boundary) {
+        if this.Effect = effect && this.Boundary = boundary {
+            this.Seen := true
+            throw Error("log-test-interruption")
+        }
+    }
+}
+
+class ProtectedLogDirectoryProbe extends AppEventLog {
+    EnsureDirectory() {
+        this.Protected := true
+        super.EnsureDirectory()
+    }
+}
+
+CheckOperationalLogs(root) {
+    directory := root "\_operational-logs-" DllCall("GetCurrentProcessId")
+    try {
+        for effect in ["directory.create", "current.create", "record.append", "record.flush",
+            "oldest.delete", "predecessor.move", "current.move", "partial.truncate", "oversized.delete"] {
+            for boundary in ["before", "after"] {
+                path := directory "\" StrReplace(effect, ".", "-") "-" boundary
+                probe := LogInterruptionProbe(effect, boundary)
+                if effect != "directory.create" {
+                    DirCreate(path)
+                    if InStr(effect, ".move") || effect = "oldest.delete" {
+                        for suffix in ["", ".1", ".2"]
+                            FileAppend(StrReplace(Format("{:0255}", 0), "0", "x") "`n",
+                                path "\tray.log" suffix, "UTF-8-RAW")
+                    } else if effect = "partial.truncate"
+                        FileAppend("partial", path "\tray.log", "UTF-8-RAW")
+                    else if effect = "oversized.delete"
+                        FileAppend(StrReplace(Format("{:0300}", 0), "0", "x"), path "\tray.log.2", "UTF-8-RAW")
+                }
+                failed := false
+                try {
+                    logger := AppEventLog("tray", path, 256, probe.Observe.Bind(probe))
+                    logger.Write("INFO", "test.started")
+                } catch Error as failure {
+                    if failure.Message != "log-test-interruption"
+                        throw failure
+                    failed := true
+                }
+                if !failed || !probe.Seen
+                    throw Error("The log boundary was not interrupted: " effect " " boundary)
+                ; No recovery checkpoints are supplied to a fresh writer.
+                logger := AppEventLog("tray", path, 256)
+                Loop 12
+                    logger.Write("INFO", "test.repeated", "code=" A_Index)
+                CheckLogFiles(path, 256)
+            }
+        }
+        path := directory "\metadata"
+        logger := AppEventLog("tray", path, 512)
+        previous := AppEventLog.Current
+        AppEventLog.Current := logger
+        try WriteAppError("test.failure", Error("PRIVATE_EDITOR_TEXT", , "PRIVATE_CLIPBOARD_TEXT"))
+        finally AppEventLog.Current := previous
+        content := FileRead(path "\tray.log", "UTF-8")
+        if InStr(content, "PRIVATE_") || !InStr(content, "test.failure") || !InStr(content, "type=Error")
+            throw Error("Error logging stored content or omitted useful error metadata")
+        ; Existing hardlinks must be refused before any write or truncation.
+        sentinel := directory "\_sentinel"
+        FileAppend("unchanged", sentinel, "UTF-8-RAW")
+        FileDelete(path "\tray.log")
+        if !DllCall("CreateHardLinkW", "Str", path "\tray.log", "Str", sentinel, "Ptr", 0)
+            throw OSError()
+        rejected := false
+        try AppEventLog("tray", path, 512)
+        catch Error
+            rejected := true
+        if !rejected || FileRead(sentinel, "UTF-8") != "unchanged"
+            throw Error("The logger wrote through a substituted hardlink")
+        FileDelete(path "\tray.log")
+        ; A directory junction must be rejected while its target is untouched.
+        target := directory "\_junction-target"
+        DirCreate(target)
+        shell := ComObject("WScript.Shell")
+        if shell.Run('cmd.exe /d /c mklink /J "' directory '\_junction" "' target '"', 0, true) != 0
+            throw Error("Could not create the log junction fixture")
+        rejected := false
+        try AppEventLog("tray", directory "\_junction", 512)
+        catch Error
+            rejected := true
+        DirDelete(directory "\_junction")
+        if !rejected || FileExist(target "\tray.log.lock")
+            throw Error("The logger followed a substituted log directory")
+        if A_IsAdmin {
+            ; Exercise the production SYSTEM/admin ACL path inside this test's
+            ; private root, without creating or changing shared application logs.
+            protected := ProtectedLogDirectoryProbe("service", directory "\_protected", 512)
+            protected.Write("INFO", "test.protected")
+            protected := ProtectedLogDirectoryProbe("service", directory "\_protected", 512)
+            protected.Write("INFO", "test.reopened")
+            if !InStr(FileRead(protected.Path, "UTF-8"), "test.reopened")
+                throw Error("The protected operational log could not be reopened")
+        }
+        concurrent := directory "\_concurrent"
+        workers := []
+        try {
+            Loop 2 {
+                workers.Push(StartAppProcessFixture(A_ScriptFullPath,
+                    '"' concurrent '" --emit-test-events', false))
+            }
+            for worker in workers
+                if WaitForCompanionExit(worker.handle, 10000) != 0
+                    throw Error("A concurrent log writer timed out")
+                else {
+                    code := 0
+                    if !DllCall("GetExitCodeProcess", "Ptr", worker.handle, "UInt*", &code) || code != 0
+                        throw Error("A concurrent log writer failed with exit " code)
+                }
+            CheckLogFiles(concurrent, 2048)
+            if !InStr(FileRead(concurrent "\tray.log", "UTF-8"), "test.concurrent")
+                throw Error("Concurrent writers did not finish their records")
+        } finally {
+            for worker in workers
+                try {
+                    if WaitForCompanionExit(worker.handle, 0) != 0
+                        StopOwnedProcess(worker.handle, "test log writer")
+                } finally CloseCompanionHandle(worker.handle)
+        }
+    } finally {
+        if DirExist(directory)
+            DirDelete(directory, true)
+    }
+}
+
+CheckLogFiles(path, maximumBytes) {
+    count := 0
+    Loop Files path "\*", "F" {
+        count += 1
+        if !RegExMatch(A_LoopFileName, "^tray\.log(?:\.[12])?$") || A_LoopFileSize > maximumBytes
+            throw Error("Operational logs exceeded their fixed size/count or retained a lock")
+        content := FileRead(A_LoopFileFullPath, "UTF-8")
+        if content != "" && SubStr(content, -1) != "`n"
+            throw Error("A fresh writer did not remove a partial log record")
+    }
+    if count > 3 || !FileExist(path "\tray.log")
+        throw Error("Operational log retention lost the current file or exceeded three files")
+}
+
+StartAppProcessFixture(script, arguments := "--skip-update-check", suspended := true) {
+    command := '"' A_AhkPath '" /script "' script '" ' arguments
+    commandBuffer := Buffer((StrLen(command) + 1) * 2, 0)
+    StrPut(command, commandBuffer, "UTF-16")
+    startup := Buffer(104, 0), process := Buffer(24, 0)
+    NumPut("UInt", startup.Size, startup)
+    if !DllCall("CreateProcessW", "Str", A_AhkPath, "Ptr", commandBuffer,
+        "Ptr", 0, "Ptr", 0, "Int", false, "UInt", suspended ? 4 : 0x08000000, "Ptr", 0,
+        "Str", A_ScriptDir, "Ptr", startup, "Ptr", process)
+        throw OSError()
+    DllCall("CloseHandle", "Ptr", NumGet(process, 8, "Ptr"))
+    return {Handle: NumGet(process, 0, "Ptr"), Pid: NumGet(process, 16, "UInt")}
+}
+
+CheckOwnedTrayProcessTermination() {
+    ; Suspended workers cannot respond to a graceful close. They never execute
+    ; app code, register hotkeys, or touch user text. A different script using
+    ; the same runtime is the sentinel which recovery must leave alone.
+    directory := GetServiceAppDirectory()
+    owned := StartAppProcessFixture(directory "\CeratopsKeyboardLayout.ahk")
+    sentinel := StartAppProcessFixture(A_ScriptFullPath)
+    try {
+        found := false, evidence := "No WMI record"
+        for process in ReadRunningAppProcesses() {
+            if process.Pid = owned.Pid {
+                evidence := process.Path " | " process.Command " | " process.Created
+                found := IsOwnedTrayProcess(process)
+                if IsOwnedTrayProcess(process, process.Session + 1)
+                    throw Error("Recovery accepted a different desktop session")
+            }
+            if process.Pid = sentinel.Pid && IsOwnedTrayProcess(process)
+                throw Error("Recovery accepted an unrelated script using the same runtime")
+        }
+        if !found
+            throw Error("Recovery did not identify its exact suspended tray worker: " evidence)
+        StopMatchingTrayProcesses()
+        StopMatchingTrayProcesses()
+        if WaitForCompanionExit(owned.Handle, 0) != 0
+            throw Error("Force recovery left the unresponsive owned tray process alive")
+        if WaitForCompanionExit(sentinel.Handle, 0) != 0x102
+            throw Error("Force recovery terminated an unrelated script")
+    } finally {
+        for fixture in [owned, sentinel] {
+            if WaitForCompanionExit(fixture.Handle, 0) = 0x102
+                TerminateCompanion(fixture.Handle)
+            WaitForCompanionExit(fixture.Handle, 5000)
+            CloseCompanionHandle(fixture.Handle)
+        }
+    }
+}
+
 DismissToolbar(*) {
     global toolbar, toolbarControl
     toolbar.open := false
@@ -138,7 +703,9 @@ ObserveNativeTrayMenu(parentPid, parentWindow, menuHandle, languageCount, output
 }
 
 PostTestTrayNotification(event) {
-    if !DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404, "UPtr", 0x404, "Ptr", event)
+    ; Version 4 packs the icon ID above the notification code.
+    if !DllCall("PostMessageW", "Ptr", A_ScriptHwnd, "UInt", 0x404,
+        "UPtr", 0, "Ptr", (0x404 << 16) | event)
         throw OSError()
 }
 
@@ -178,6 +745,11 @@ CheckTrayClicksAndInterruptions(shortcuts, directory) {
     ; mouse clicks are injected into the user's applications.
     menu.ShowSettings()
     try {
+        for event in [0x406, 0x407]
+            PostTestTrayNotification(event)
+        Sleep(50)
+        if menu.OpenCount || menu.MenuOpen
+            throw Error("A hover notification opened a tray popup")
         CheckTrayDoubleClickSequence(menu)
         for event in [0x202, 0x205] {
             before := menu.OpenCount
@@ -309,15 +881,15 @@ CheckTrayRestorationInterruptions() {
             if AppTrayIconIsRegistered()
                 throw Error("The tray fixture still has an icon")
             setHidden := InterruptTrayVisibility.Bind(selectedEffect, boundary)
-            clearTooltip := InterruptInterfaceEffect.Bind(HideAppTrayTooltip,
+            suppressHover := InterruptInterfaceEffect.Bind(SuppressAppTrayHover,
                 "tooltip", selectedEffect, boundary)
-            ExpectInterfaceInterruption(RestoreAppTrayIcon.Bind(setHidden, clearTooltip))
+            ExpectInterfaceInterruption(RestoreAppTrayIcon.Bind(setHidden, suppressHover))
             if !RestoreAppTrayIcon() || !AppTrayIconIsRegistered()
                 throw Error("A fresh tray request did not restore the missing icon")
         }
     }
     SetAppTrayIconHidden(true)
-    if RestoreAppTrayIcon(SetAppTrayIconHidden, HideAppTrayTooltip, (*) => false)
+    if RestoreAppTrayIcon(SetAppTrayIconHidden, SuppressAppTrayHover, (*) => false)
         throw Error("A rejected tray registration was reported as complete")
     CheckAndRestoreAppTrayIcon()
     if !AppTrayIconIsRegistered()
@@ -333,11 +905,11 @@ CheckInterfaceInterruptions(shortcuts) {
     for boundary in boundaries {
         for selectedEffect in ["icon", "tooltip"] {
             setIcon := InterruptInterfaceEffect.Bind(TraySetIcon, "icon", selectedEffect, boundary)
-            clearTooltip := InterruptInterfaceEffect.Bind(HideAppTrayTooltip, "tooltip", selectedEffect, boundary)
-            ExpectInterfaceInterruption(InitializeAppTray.Bind(iconFile, setIcon, clearTooltip))
+            suppressHover := InterruptInterfaceEffect.Bind(SuppressAppTrayHover, "tooltip", selectedEffect, boundary)
+            ExpectInterfaceInterruption(InitializeAppTray.Bind(iconFile, setIcon, suppressHover))
             InitializeAppTray(iconFile)
-            if !HideAppTrayTooltip()
-                throw Error("A fresh tray setup did not remove its tooltip")
+            if !SuppressAppTrayHover()
+                throw Error("A fresh tray setup did not suppress hover popups")
         }
         ExpectInterfaceInterruption(InterruptInterfaceEffect.Bind(shortcuts.RebuildTray.Bind(shortcuts),
             "menu", "menu", boundary))
@@ -454,11 +1026,18 @@ CheckSmallIconVisibility() {
 CheckKeyCombinationInterface(shortcuts) {
     CheckSmallIconVisibility()
     InitializeAppTray(A_ScriptDir "\..\CeratopsKeyboardLayout.ico")
-    if !HideAppTrayTooltip()
-        throw Error("Windows did not accept removal of this test app's tray tooltip")
+    version := GetAppVersionText()
+    if version = "" || !SuppressAppTrayHover()
+        throw Error("The tray has no version or rejected hover suppression")
     shortcuts.RebuildTray()
     if A_TrayMenu.Default != "Change key combinations..." || A_TrayMenu.ClickCount != 2
         throw Error("The tray default does not open key combinations on a double-click")
+    count := DllCall("GetMenuItemCount", "Ptr", A_TrayMenu.Handle, "Int")
+    versionText := Buffer(128, 0)
+    if !DllCall("GetMenuStringW", "Ptr", A_TrayMenu.Handle, "UInt", count - 2,
+        "Ptr", versionText, "Int", 64, "UInt", 0x400, "Int")
+        || StrGet(versionText, "UTF-16") != "Version " version
+        throw Error("The tray menu does not show the current app version")
     for index, row in shortcuts.InstalledRows() {
         item := Buffer(A_PtrSize = 8 ? 80 : 48, 0)
         NumPut("UInt", item.Size, "UInt", 0x120, item)
@@ -613,13 +1192,51 @@ if A_Args.Length && A_Args[1] = "--observe-menu" {
 if A_Args.Length && A_Args[A_Args.Length] = "--dispatch-only" {
     try {
         CheckDispatchInterruptions()
-        try FileAppend("PASS repeated dispatcher requests and both teardown interruption boundaries`n", "*")
+        CheckCompanionShutdown()
+        CheckForceRestartTransitions()
+        CheckOwnedTrayProcessTermination()
+        CheckDailyAutomaticUpdates()
+        try FileAppend("PASS dispatcher, shutdown, interrupted/fresh force restart and exact-path unresponsive-process termination`n", "*")
         dispatchCode := 0
     } catch Error as failure {
         try FileAppend("FAIL: " failure.Message " (line " failure.Line ")`n", "*")
         dispatchCode := 1
     }
     ExitApp(dispatchCode)
+}
+
+if A_Args.Length = 2 && A_Args[2] = "--diagnostics-only" {
+    try {
+        CheckOperationalLogs(A_Args[1])
+        FileAppend("PASS bounded logs, private error metadata, unsafe paths and interrupted/fresh writes`n", "*")
+        ExitApp(0)
+    } catch Error as failure {
+        FileAppend("FAIL: " failure.Message " (" failure.File ":" failure.Line ")`n" failure.Stack "`n", "*")
+        ExitApp(1)
+    }
+}
+
+if A_Args.Length = 2 && A_Args[2] = "--physical-hover" {
+    try {
+        CheckPhysicalTrayHover(A_Args[1])
+        FileAppend("PASS physical pointer hover with no nearby tooltip; inspect _tray-hover.png`n", "*")
+        ExitApp(0)
+    } catch Error as failure {
+        FileAppend("FAIL physical hover: " failure.Message " (line " failure.Line ")`n", "*")
+        ExitApp(failure.Extra = "LOCKED" ? 2 : 1)
+    }
+}
+
+if A_Args.Length = 2 && A_Args[2] = "--emit-test-events" {
+    try {
+        logger := AppEventLog("tray", A_Args[1], 2048)
+        Loop 30
+            logger.Write("INFO", "test.concurrent", "code=" A_Index)
+        ExitApp(0)
+    } catch Error as failure {
+        FileAppend("FAIL concurrent log writer: " failure.Message "`n", "*")
+        ExitApp(1)
+    }
 }
 
 ; UI-only checks do not register global keys, send keyboard input, change the
@@ -667,7 +1284,7 @@ try {
     shortcuts.Start()
     CheckKeyCombinationInterface(shortcuts)
     CheckInterfaceInterruptions(shortcuts)
-    if DllCall("GetMenuItemCount", "Ptr", A_TrayMenu.Handle) != Converter.Layouts.Count + 7
+    if DllCall("GetMenuItemCount", "Ptr", A_TrayMenu.Handle) != Converter.Layouts.Count + 9
         throw Error("Tray menu does not show the installed languages and shortcut help")
     shortcuts.ShowSettings()
     if shortcuts.Controls.Count != Converter.Layouts.Count

@@ -6,25 +6,30 @@
 global IUIAutomationActivateScreenReader := 0
 #Include Lib\UIA.ahk
 #Include Manage-KeyboardShortcuts.ahk
+#Include Write-AppEventLog.ahk
 
+if A_LineFile = A_ScriptFullPath {
+    InitializeAppEventLog("tray")
+}
 global Converter := KeyboardConverter()
 if A_LineFile = A_ScriptFullPath {
+    WriteAppEvent("INFO", "app.started", "version=" GetAppVersionText())
     InitializeAppTray(A_ScriptDir "\CeratopsKeyboardLayout.ico")
     global Shortcuts := KeyboardShortcutManager(Converter)
     Shortcuts.Start()
     StartAppUpdateCheck()
 }
 
-InitializeAppTray(iconFile, setIcon := TraySetIcon, clearTooltip := HideAppTrayTooltip) {
+InitializeAppTray(iconFile, setIcon := TraySetIcon, suppressHover := SuppressAppTrayHover) {
     ; Optional callbacks let tests interrupt either native effect in isolation.
     ; TraySetIcon selects the ICO's small image at Windows' tray dimensions.
     ; Every ICO size uses a closer Trixie face crop for visibility on dark trays.
     ; Freeze the same artwork during pause/suspend.
     setIcon(iconFile, 1, true)
-    clearTooltip()
+    suppressHover()
     ; Explorer can still be starting when the service launches this script.
     ; AutoHotkey cannot retry a failed initial tray registration on its own.
-    ; Recheck after TaskbarCreated so the restored icon has no tooltip either.
+    ; Explorer recreates icons with the legacy hover behavior, so apply this again.
     static afterExplorerRestart := (*) => SetTimer(CheckAndRestoreAppTrayIcon, -1)
     OnMessage(DllCall("RegisterWindowMessageW", "Str", "TaskbarCreated", "UInt"), afterExplorerRestart)
     CheckAndRestoreAppTrayIcon()
@@ -38,13 +43,13 @@ CheckAndRestoreAppTrayIcon(*) {
 }
 
 RestoreAppTrayIcon(setHidden := SetAppTrayIconHidden,
-    clearTooltip := HideAppTrayTooltip, iconRegistered := AppTrayIconIsRegistered) {
+    suppressHover := SuppressAppTrayHover, iconRegistered := AppTrayIconIsRegistered) {
     if !iconRegistered() {
         ; Toggling this built-in variable calls AutoHotkey's icon creation path.
         setHidden(true)
         setHidden(false)
     }
-    return iconRegistered() && clearTooltip()
+    return iconRegistered() && suppressHover()
 }
 
 SetAppTrayIconHidden(hidden) {
@@ -61,15 +66,39 @@ AppTrayIconIsRegistered() {
         "Ptr", rectangle, "Int") = 0
 }
 
-HideAppTrayTooltip(*) {
-    ; A_IconTip := "" restores the script name. NIF_TIP with an empty szTip
-    ; actually removes the hover tooltip, without changing clicks or balloons.
-    ; AHK uses its callback message (0x404) as the notification icon ID too.
+SuppressAppTrayHover(*) {
+    ; Version 4 suppresses the standard tooltip unless NIF_SHOWTIP is requested.
+    ; Sending empty tooltip text instead leaves a blank hover box on Windows 11.
+    ; The tray router handles version 4's packed mouse and keyboard callbacks.
     data := Buffer(A_PtrSize = 8 ? 976 : 956, 0)
     NumPut("UInt", data.Size, data)
     NumPut("Ptr", A_ScriptHwnd, data, A_PtrSize)
-    NumPut("UInt", 0x404, "UInt", 0x4, data, A_PtrSize * 2)
-    return DllCall("Shell32\Shell_NotifyIconW", "UInt", 1, "Ptr", data, "Int")
+    NumPut("UInt", 0x404, data, A_PtrSize * 2)
+    NumPut("UInt", 4, data, A_PtrSize = 8 ? 816 : 800)
+    return DllCall("Shell32\Shell_NotifyIconW", "UInt", 4, "Ptr", data, "Int")
+}
+
+GetAppVersionText() {
+    ; Inno Setup owns the installed version. A source checkout uses its setup
+    ; definition; an arbitrary copied script never claims another install's version.
+    ; A_LineFile stays with this app file when a test includes it from Tests.
+    SplitPath(A_LineFile, , &appDirectory)
+    key := "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Ceratops Keyboard Layout_is1"
+    try {
+        installedDirectory := RegRead(key, "InstallLocation", "")
+        if installedDirectory != "" && StrLower(RTrim(installedDirectory, "\"))
+            = StrLower(RTrim(appDirectory, "\")) {
+            version := RegRead(key, "DisplayVersion", "")
+            if RegExMatch(version, "^\d+(?:\.\d+){2,3}$")
+                return version
+        }
+    }
+    try {
+        definition := FileRead(appDirectory "\CeratopsKeyboardLayout-Setup.iss", "UTF-8")
+        if RegExMatch(definition, 'm)^#define AppVersion "(\d+(?:\.\d+){2,3})"\r?$', &match)
+            return match[1]
+    }
+    return ""
 }
 
 StartAppUpdateCheck(manual := false, launch := Run) {
@@ -82,10 +111,30 @@ StartAppUpdateCheck(manual := false, launch := Run) {
         . ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
         . A_ScriptDir '\Update-AppInstall.ps1"' . (manual ? ' -Manual' : ''), A_ScriptDir, "Hide")
     catch Error as failure {
+        WriteAppError("update.launch-failed", failure)
         if manual
             MsgBox("Could not start the update check.`n`n" failure.Message,
                 "Ceratops Keyboard Layout", "Icon!")
     }
+}
+
+AppServiceIsInstalled() {
+    try {
+        image := RegRead("HKLM\SYSTEM\CurrentControlSet\Services\CeratopsKeyboardLayoutService",
+            "ImagePath", "")
+        expected := '"' A_ScriptDir '\CeratopsKeyboardLayout.exe" /script "'
+            . A_ScriptDir '\CeratopsKeyboardLayout-Service.ahk" --service'
+        return StrLower(image) = StrLower(expected)
+    }
+    return false
+}
+
+StartAppForceRestart(*) {
+    try Run('"' A_AhkPath '" /script "' A_ScriptDir
+        . '\CeratopsKeyboardLayout-Service.ahk" --force-restart', A_ScriptDir, "Hide")
+    catch Error as failure
+        MsgBox("Could not start Ceratops recovery.`n`n" failure.Message,
+            "Ceratops Keyboard Layout", "Icon!")
 }
 
 class KeyboardConverter {
@@ -571,6 +620,7 @@ ConvertOneFocusedText(target, window, behavior) {
         field := FocusedTextField(window)
         field.Convert(target, CurrentInputLanguage(window), behavior)
     } catch Error as failure {
+        WriteAppError("conversion.failed", failure)
         failureMessage := failure.Message
     } finally {
         ; The shortcut chooses its language even when there is no editable text.
@@ -578,6 +628,7 @@ ConvertOneFocusedText(target, window, behavior) {
         if canSwitch {
             try SwitchInputLanguage(window, target)
             catch Error as failure {
+                WriteAppError("keyboard.switch-failed", failure)
                 failureMessage .= (failureMessage = "" ? "" : "`n") failure.Message
             }
         }

@@ -225,8 +225,10 @@ class KeyboardShortcutManager {
     Start() {
         warning := ""
         try this.Assignments := this.Settings.Load()
-        catch Error as failure
+        catch Error as failure {
+            WriteAppError("settings.load-failed", failure)
             warning := "Using default shortcuts. " failure.Message
+        }
         this.ReplaceBindings(this.Assignments)
         this.RebuildTray()
         if warning != ""
@@ -401,7 +403,14 @@ class KeyboardShortcutManager {
         A_TrayMenu.Default := settingsItem
         A_TrayMenu.ClickCount := 2
         A_TrayMenu.Add("Check for updates", (*) => StartAppUpdateCheck(true))
+        A_TrayMenu.Add("Force restart Ceratops", StartAppForceRestart)
+        if !AppServiceIsInstalled()
+            A_TrayMenu.Disable("Force restart Ceratops")
         A_TrayMenu.Add()
+        version := GetAppVersionText()
+        versionItem := version = "" ? "Version unavailable" : "Version " version
+        A_TrayMenu.Add(versionItem, (*) => 0)
+        A_TrayMenu.Disable(versionItem)
         A_TrayMenu.Add("Exit", (*) => ExitApp())
     }
 
@@ -533,6 +542,8 @@ class KeyboardShortcutManager {
 
     OnTrayMessage(wParam, lParam, *) {
         event := lParam & 0xFFFF
+        if event = 0x406 || event = 0x407
+            return 0 ; NIN_POPUPOPEN/CLOSE: this icon has no hover interface.
         if event = 0x201 {
             this.SuppressLeftUp := false
             return

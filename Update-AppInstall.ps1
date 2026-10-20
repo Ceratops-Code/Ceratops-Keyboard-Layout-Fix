@@ -2,7 +2,7 @@
 # upgrade. Windows PowerShell 5.1 is sufficient; no account or extra runtime is
 # needed. Dot-source this file to exercise its operations without starting them.
 [CmdletBinding()]
-param([switch]$Apply, [string]$TargetVersion, [switch]$Manual)
+param([switch]$Apply, [string]$TargetVersion, [switch]$Manual, [switch]$Automatic)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -442,12 +442,56 @@ function Start-UpgradeWorker {
     finally { $process.Dispose() }
 }
 
+function Write-AppUpdateEvent {
+    [CmdletBinding()]
+    param([string]$Level, [string]$EventName, [int]$Code = 0,
+        [string]$InstallDirectory = $PSScriptRoot)
+    # Dot-sourced tests own their diagnostics. Installed helpers use the shared
+    # AHK rotator, passing no network response, exception message or user text.
+    if (-not $script:AppUpdateLogEnabled) { return }
+    $writer = Join-Path $InstallDirectory 'Write-AppEventLog.ahk'
+    if (-not (Test-Path -LiteralPath $writer -PathType Leaf)) { return }
+    $runtime = Join-Path $InstallDirectory 'CeratopsKeyboardLayout.exe'
+    $hostScript = Join-Path $InstallDirectory 'CeratopsKeyboardLayout-Service.ahk'
+    $arguments = '/ErrorStdOut=UTF-8 /script "{0}" --write-event {1} {2} {3}' -f $hostScript, $Level, $EventName, $Code
+    $process = [Diagnostics.Process]::new()
+    $stdout = '<absent>'; $stderr = '<absent>'; $exitStatus = '<not started>'
+    try {
+        $process.StartInfo.FileName = $runtime
+        $process.StartInfo.Arguments = $arguments
+        $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.CreateNoWindow = $true
+        $process.StartInfo.RedirectStandardOutput = $true
+        $process.StartInfo.RedirectStandardError = $true
+        $null = $process.Start()
+        $exitStatus = '<still running>'
+        $stdout = '<not collected>'; $stderr = '<not collected>'
+        $timedOut = -not $process.WaitForExit(5000)
+        if ($timedOut) {
+            $process.Kill()
+            if (-not $process.WaitForExit(5000)) { throw 'Windows could not terminate the operational log writer.' }
+        }
+        $exitStatus = [string]$process.ExitCode
+        $output = $process.StandardOutput.ReadToEnd(); $stdout = if ($output) { $output } else { '<absent>' }
+        $output = $process.StandardError.ReadToEnd(); $stderr = if ($output) { $output } else { '<absent>' }
+        if ($timedOut) { throw 'The operational log writer timed out.' }
+        if ($process.ExitCode -ne 0) { throw 'The operational log writer failed.' }
+    } catch {
+        # The writer itself reports storage failures to Windows Application events.
+        # A launch/timeout failure still returns command diagnostics on the warning
+        # stream, without stopping an upgrade or changing its success result.
+        Write-Warning ("Operational log command failed: `"$runtime`" $arguments; exit=$exitStatus; " +
+            "stdout=$stdout; stderr=$stderr; cause=$($_.Exception.Message)")
+    } finally { $process.Dispose() }
+}
+
 function Invoke-AppUpdateCheck {
     param([string]$InstallDirectory = $PSScriptRoot,
         [hashtable]$Operations = (Get-UpdateOperations),
         [scriptblock]$Prompt = { param($message) Show-UpdateMessage $message -Ask },
         [scriptblock]$StartUpgrade = { param($version) Start-UpgradeWorker $version },
         [switch]$Manual,
+        [switch]$Automatic,
         [scriptblock]$Notify = {
             param($message, [bool]$success = $false)
             $null = Show-UpdateMessage $message -Success:$success
@@ -468,20 +512,24 @@ function Invoke-AppUpdateCheck {
             return
         }
     } catch {
+        Write-AppUpdateEvent 'ERROR' 'update.check-failed' $_.Exception.HResult
         if ($Manual) { & $Notify ('Could not check for updates. The current version was not changed.' +
             [Environment]::NewLine + [Environment]::NewLine + $_.Exception.Message) }
         return
     }
     $message = 'Ceratops Keyboard Layout {0} is available (installed: {1}).{2}{2}Upgrade now? Hotkeys pause briefly during installation.' -f
         (Get-AppVersionText $release.Version), (Get-AppVersionText $current), [Environment]::NewLine
-    if (& $Prompt $message) {
+    if ($Automatic -or (& $Prompt $message)) {
         try { & $StartUpgrade $release.Version }
-        catch { & $Notify 'Upgrade failed. The current version was not changed.' }
+        catch {
+            Write-AppUpdateEvent 'ERROR' 'upgrade.launch-failed' $_.Exception.HResult
+            if (-not $Automatic) { & $Notify 'Upgrade failed. The current version was not changed.' }
+        }
     }
 }
 
 function Invoke-ElevatedUpgrade {
-    param([string]$VersionText)
+    param([string]$VersionText, [switch]$Automatic)
     $mutex = $null
     try {
         if (-not (Test-UpdateAdministrator)) { throw 'Installation needs administrator approval.' }
@@ -490,26 +538,45 @@ function Invoke-ElevatedUpgrade {
         }
         $mutex = Enter-UpdateMutex 'Global\CeratopsKeyboardLayoutUpgrade'
         if ($null -eq $mutex) { throw 'Another Ceratops upgrade is already running.' }
+        Write-AppUpdateEvent 'INFO' 'upgrade.started'
         $result = Invoke-AppUpgrade $PSScriptRoot (ConvertTo-AppVersion $VersionText) `
             (Join-Path $PSScriptRoot 'UpdateCache') (Get-UpdateOperations)
-        $message = Get-UpgradeOutcomeMessage $result
-        if ($message) { $null = Show-UpdateMessage $message }
+        if ($result.Status -in @('Upgraded', 'Current')) {
+            Write-AppUpdateEvent 'INFO' 'upgrade.completed'
+        } else { Write-AppUpdateEvent 'ERROR' 'upgrade.failed' }
+        if (-not $Automatic) {
+            $message = Get-UpgradeOutcomeMessage $result
+            if ($message) { $null = Show-UpdateMessage $message }
+        }
     } catch {
-        $null = Show-UpdateMessage ("Upgrade failed. " + $_.Exception.Message)
+        Write-AppUpdateEvent 'ERROR' 'upgrade.failed' $_.Exception.HResult
+        if (-not $Automatic) { $null = Show-UpdateMessage ("Upgrade failed. " + $_.Exception.Message) }
     } finally {
         if ($null -ne $mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
     }
 }
 
-if ($MyInvocation.InvocationName -ne '.') {
+$script:AppUpdateLogEnabled = $MyInvocation.InvocationName -ne '.'
+if ($script:AppUpdateLogEnabled) {
     if ($Apply) { Invoke-ElevatedUpgrade $TargetVersion }
     else {
         $startupMutex = $null
         try {
-            $startupMutex = Enter-UpdateMutex 'Local\CeratopsKeyboardLayoutUpdateCheck'
-            if ($null -ne $startupMutex) { Invoke-AppUpdateCheck -Manual:$Manual }
+            $mutexName = if ($Automatic) { 'Global\CeratopsKeyboardLayoutAutomaticUpdateCheck' }
+                else { 'Local\CeratopsKeyboardLayoutUpdateCheck' }
+            $startupMutex = Enter-UpdateMutex $mutexName
+            if ($null -ne $startupMutex) {
+                if ($Automatic) {
+                    if (-not (Test-UpdateAdministrator)) { throw 'Automatic upgrades require the elevated service.' }
+                    Invoke-AppUpdateCheck -Automatic -StartUpgrade {
+                        param($version)
+                        Invoke-ElevatedUpgrade (Get-AppVersionText $version) -Automatic
+                    }
+                } else { Invoke-AppUpdateCheck -Manual:$Manual }
+            }
             elseif ($Manual) { $null = Show-UpdateMessage 'An update check is already running.' }
         } catch {
+            Write-AppUpdateEvent 'ERROR' 'update.worker-failed' $_.Exception.HResult
             # A failed background check must never disable keyboard conversion.
             if ($Manual) { $null = Show-UpdateMessage ('Could not check for updates. ' + $_.Exception.Message) }
         } finally {
