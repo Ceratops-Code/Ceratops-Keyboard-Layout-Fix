@@ -110,10 +110,14 @@ EditorSelection(control) {
 }
 
 oldClipboard := ClipboardAll()
-stage := "initial"
+stage := "editor fixture startup"
 try {
     Run('"' A_AhkPath '" "' A_ScriptDir '\Show-TestField.ahk"', , , &fixturePid)
-    fixtureWindow := WinWait("ahk_pid " fixturePid, , 3)
+    ; Wait for the editor itself, then require readiness before using its HWND.
+    fixtureWindow := WinWait("Keyboard conversion accessibility test ahk_pid " fixturePid, , 10)
+    if !fixtureWindow
+        throw Error("Editor fixture did not appear within 10 seconds; child "
+            . (ProcessExist(fixturePid) ? "is still running" : "has exited"))
     control := ControlGetHwnd("Edit1", "ahk_id " fixtureWindow)
     element := UIA.ElementFromHandle(control, , false)
     try FileAppend("Focused type " element.Type ", TextPattern " element.IsTextPatternAvailable "`n", "*")
