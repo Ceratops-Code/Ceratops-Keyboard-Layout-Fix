@@ -93,6 +93,10 @@ CaptureTrayHover(path, x, y) {
     ; handles belong to this test; the caller owns the one temporary PNG.
     x := Max(SysGet(76), x - 180), y := Max(SysGet(77), y - 180)
     width := 360, height := 240, token := 0, bitmap := 0, picture := 0, memory := 0
+    ; Keep GDI+ loaded until every image and its startup token are released.
+    graphicsModule := DllCall("LoadLibraryW", "Str", "gdiplus.dll", "Ptr")
+    if !graphicsModule
+        throw OSError()
     desktop := DllCall("GetDC", "Ptr", 0, "Ptr")
     try {
         memory := DllCall("gdi32\CreateCompatibleDC", "Ptr", desktop, "Ptr")
@@ -127,6 +131,7 @@ CaptureTrayHover(path, x, y) {
             DllCall("gdi32\DeleteDC", "Ptr", memory)
         if desktop
             DllCall("ReleaseDC", "Ptr", 0, "Ptr", desktop)
+        DllCall("FreeLibrary", "Ptr", graphicsModule)
     }
 }
 
@@ -146,7 +151,10 @@ CheckPhysicalTrayHover(root) {
         hoverManager := KeyboardShortcutManager(Converter, KeyboardShortcutSettings(root "\_hover-shortcuts.ini"))
         hoverManager.RebuildTray()
         if !WinExist("ahk_class TopLevelWindowForOverflowXamlIsland") {
-            chevron := UIA.ElementFromHandle(tray).FindElement({Name: "Show hidden icons"})
+            trayElement := UIA.ElementFromHandle(tray)
+            try chevron := trayElement.FindElement({Name: "Show Hidden Icons", AutomationId: "SystemTrayIcon"})
+            catch Error as failure
+                throw Error("Tray overflow control unavailable: " failure.Message "`n" trayElement.DumpAll(" ", 6))
             chevron.InvokePattern.Invoke()
             opened := true
             Sleep(300)
