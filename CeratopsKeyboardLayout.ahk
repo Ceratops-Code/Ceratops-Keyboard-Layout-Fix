@@ -1,6 +1,7 @@
 #Requires AutoHotkey v2.0.19+
 #SingleInstance Ignore
 #MaxThreadsPerHotkey 1
+#NoTrayIcon
 ; UIA is used only for the focused text field. Do not change Windows' global
 ; screen-reader setting. Runtime text, clipboard backups and maps stay in RAM.
 global IUIAutomationActivateScreenReader := 0
@@ -20,9 +21,9 @@ if A_LineFile = A_ScriptFullPath {
     StartAppUpdateCheck()
 }
 
-InitializeAppTray(iconFile, setIcon := TraySetIcon, suppressHover := SuppressAppTrayHover) {
+InitializeAppTray(iconFile, setIcon := LoadAppTrayArtwork, suppressHover := SuppressAppTrayHover) {
     ; Optional callbacks let tests interrupt either native effect in isolation.
-    ; TraySetIcon selects the ICO's small image at Windows' tray dimensions.
+    ; Load the ICO's small image at Windows' tray dimensions.
     ; Every ICO size uses a closer Trixie face crop for visibility on dark trays.
     ; Freeze the same artwork during pause/suspend.
     setIcon(iconFile, 1, true)
@@ -45,7 +46,7 @@ CheckAndRestoreAppTrayIcon(*) {
 RestoreAppTrayIcon(setHidden := SetAppTrayIconHidden,
     suppressHover := SuppressAppTrayHover, iconRegistered := AppTrayIconIsRegistered) {
     if !iconRegistered() {
-        ; Toggling this built-in variable calls AutoHotkey's icon creation path.
+        ; Inspect Explorer on every call; no saved registration state is trusted.
         setHidden(true)
         setHidden(false)
     }
@@ -53,7 +54,59 @@ RestoreAppTrayIcon(setHidden := SetAppTrayIconHidden,
 }
 
 SetAppTrayIconHidden(hidden) {
-    A_IconHidden := hidden
+    data := AppTrayNotificationData()
+    if hidden
+        return !AppTrayIconIsRegistered()
+            || DllCall("Shell32\Shell_NotifyIconW", "UInt", 2, "Ptr", data, "Int")
+    if AppTrayIconIsRegistered()
+        return true
+    if !AppTrayArtwork.Handle
+        throw Error("The Ceratops tray artwork has not been loaded.")
+    ; Register only the icon and its callback. NIF_TIP is deliberately absent:
+    ; Explorer must never create a tooltip, including an empty Windows 11 frame.
+    NumPut("UInt", 3, data, A_PtrSize = 8 ? 20 : 12) ; NIF_MESSAGE | NIF_ICON
+    NumPut("UInt", 0x404, data, A_PtrSize = 8 ? 24 : 16)
+    NumPut("Ptr", AppTrayArtwork.Handle, data, A_PtrSize = 8 ? 32 : 20)
+    return DllCall("Shell32\Shell_NotifyIconW", "UInt", 0, "Ptr", data, "Int")
+}
+
+class AppTrayArtwork {
+    static Handle := 0
+}
+
+LoadAppTrayArtwork(iconFile, *) {
+    ; AutoHotkey's implicit tray icon always registers NIF_TIP. Keep it disabled
+    ; with #NoTrayIcon and own one HICON until replacement or process exit.
+    imageType := 0
+    icon := LoadPicture(iconFile, "Icon1 w" SysGet(49) " h" SysGet(50), &imageType)
+    if !icon
+        throw Error("Could not load the Ceratops tray artwork.")
+    previous := AppTrayArtwork.Handle
+    AppTrayArtwork.Handle := icon
+    if previous
+        DllCall("DestroyIcon", "Ptr", previous)
+    static cleanup := (*) => ReleaseAppTrayArtwork()
+    static listening := false
+    if !listening {
+        OnExit(cleanup)
+        listening := true
+    }
+}
+
+ReleaseAppTrayArtwork() {
+    SetAppTrayIconHidden(true)
+    if AppTrayArtwork.Handle
+        DllCall("DestroyIcon", "Ptr", AppTrayArtwork.Handle)
+    AppTrayArtwork.Handle := 0
+    return 0
+}
+
+AppTrayNotificationData() {
+    data := Buffer(A_PtrSize = 8 ? 976 : 956, 0)
+    NumPut("UInt", data.Size, data)
+    NumPut("Ptr", A_ScriptHwnd, data, A_PtrSize)
+    NumPut("UInt", 0x404, data, A_PtrSize * 2)
+    return data
 }
 
 AppTrayIconIsRegistered() {
@@ -67,14 +120,9 @@ AppTrayIconIsRegistered() {
 }
 
 SuppressAppTrayHover(*) {
-    ; Clear AutoHotkey's cached script-name tooltip as well as selecting version
-    ; 4. Either change alone can leave a name popup or blank box on Windows 11.
+    ; Version 4 also suppresses legacy hover behavior after Explorer restarts.
     ; The tray router handles version 4's packed mouse and keyboard callbacks.
-    A_IconTip := ""
-    data := Buffer(A_PtrSize = 8 ? 976 : 956, 0)
-    NumPut("UInt", data.Size, data)
-    NumPut("Ptr", A_ScriptHwnd, data, A_PtrSize)
-    NumPut("UInt", 0x404, data, A_PtrSize * 2)
+    data := AppTrayNotificationData()
     NumPut("UInt", 4, data, A_PtrSize = 8 ? 816 : 800)
     return DllCall("Shell32\Shell_NotifyIconW", "UInt", 4, "Ptr", data, "Int")
 }
@@ -607,7 +655,8 @@ class RichHtml {
 
 ConvertOneFocusedText(target, window, behavior) {
     global Converter
-    failureMessage := "", canSwitch := false
+    failureMessage := "", canSwitch := false, outcome := "completed"
+    AppConversionDiagnostics.Begin(target, window, behavior)
     try {
         ; Query once per queued conversion, never per character or HTML part.
         Converter.RefreshInstalledLayouts()
@@ -616,23 +665,31 @@ ConvertOneFocusedText(target, window, behavior) {
         canSwitch := true
         ; Ordinary (non-Blind) SendInput releases unnecessary held modifiers
         ; around Ctrl+A/C/V and restores them. Never wait for physical release.
-        if !WinActive("ahk_id " window)
+        if !WinActive("ahk_id " window) {
+            outcome := "focus-changed"
             return
+        }
+        AppConversionDiagnostics.Mark("field-discovery")
         field := FocusedTextField(window)
+        AppConversionDiagnostics.Mark("text-conversion")
         field.Convert(target, CurrentInputLanguage(window), behavior)
     } catch Error as failure {
+        outcome := "failed"
         WriteAppError("conversion.failed", failure)
         failureMessage := failure.Message
     } finally {
         ; The shortcut chooses its language even when there is no editable text.
         ; Never direct a late request to another window if focus has moved.
         if canSwitch {
+            AppConversionDiagnostics.Mark("keyboard-switch")
             try SwitchInputLanguage(window, target)
             catch Error as failure {
+                outcome := "failed"
                 WriteAppError("keyboard.switch-failed", failure)
                 failureMessage .= (failureMessage = "" ? "" : "`n") failure.Message
             }
         }
+        AppConversionDiagnostics.Finish(outcome)
         if failureMessage != "" {
             ToolTip(failureMessage)
             SetTimer(() => ToolTip(), -3000)
@@ -666,22 +723,31 @@ SwitchInputLanguage(window, target) {
     layout := Converter.RequireInstalledLayout(target)
     language := layout & 0xFFFF
     current := DllCall("GetKeyboardLayout", "UInt", thread, "Ptr")
+    diagnostic := ("request=" AppConversionDiagnostics.Request " thread=" thread
+        " recipient=" recipient " before=" current " requested=" layout)
+    WriteAppEvent("INFO", "keyboard.switch-requested", diagnostic)
     if (current & 0xFFFF) = language
         return
     ; Windows sends this message to the focused window when the user picks a
     ; language. The receiving app accepts it through its own window procedure.
     if !DllCall("PostMessageW", "Ptr", recipient, "UInt", 0x50, "UPtr", 0,
         "Ptr", layout, "Int")
-        throw Error("Windows could not request the keyboard layout change.")
+        throw OSError(A_LastError, , "Windows could not request the keyboard layout change.")
     deadline := A_TickCount + 1000
     while WinActive("ahk_id " window) && A_TickCount < deadline {
         current := DllCall("GetKeyboardLayout", "UInt", thread, "Ptr")
-        if (current & 0xFFFF) = language
+        if (current & 0xFFFF) = language {
+            WriteAppEvent("INFO", "keyboard.switch-confirmed", "request=" AppConversionDiagnostics.Request
+                " thread=" thread " actual=" current)
             return
+        }
         Sleep(25)
     }
-    if WinActive("ahk_id " window)
+    if WinActive("ahk_id " window) {
+        WriteAppEvent("WARN", "keyboard.switch-timeout", diagnostic " actual=" current)
         throw Error("The active app did not switch its keyboard layout.")
+    }
+    WriteAppEvent("INFO", "keyboard.switch-focus-changed", "request=" AppConversionDiagnostics.Request)
 }
 
 FocusedTextField(window) {

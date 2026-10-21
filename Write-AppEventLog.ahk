@@ -11,13 +11,16 @@ class AppEventLog {
         if !RegExMatch(component, "^(tray|service|recovery|setup|updater)$")
             throw ValueError("Unknown operational log component.")
         this.Protected := directory = "" && A_IsAdmin
-        this.Directory := directory != "" ? directory : A_IsAdmin
-            ? A_AppDataCommon "\CeratopsKeyboardLayoutLogs"
-            : EnvGet("LOCALAPPDATA") "\CeratopsKeyboardLayout\Logs"
+        this.Directory := directory != "" ? directory : AppEventLog.DefaultDirectory()
         this.Component := component, this.MaximumBytes := maximumBytes
         this.Path := this.Directory "\" component ".log"
         this.Observe := IsSet(observe) ? observe : (*) => 0
         this.WithLock(this.CheckRetainedFiles.Bind(this))
+    }
+
+    static DefaultDirectory(elevated := A_IsAdmin) {
+        return elevated ? A_AppDataCommon "\CeratopsKeyboardLayoutLogs"
+            : EnvGet("LOCALAPPDATA") "\CeratopsKeyboardLayout\Logs"
     }
 
     Write(level, event, fields := "") {
@@ -283,6 +286,73 @@ class AppEventLog {
         if !DllCall("FlushFileBuffers", "Ptr", handle)
             throw OSError()
     }
+}
+
+GetDiagnosticUptimeMilliseconds() => DllCall("GetTickCount64", "UInt64")
+
+class AppConversionDiagnostics {
+    ; Observations only: never use these counters or logs to resume or skip work.
+    ; Fixed stage names, numeric window/process/layout IDs and language labels
+    ; cannot contain editor text, titles, clipboard data or pressed characters.
+    static Request := 0
+    static StartedAt := 0
+    static Stage := "idle"
+    static Completed := 0
+    static Failed := 0
+
+    static Begin(target, window, behavior) {
+        this.Request += 1, this.StartedAt := GetDiagnosticUptimeMilliseconds(), this.Stage := "layouts"
+        pid := 0
+        try pid := WinGetPID("ahk_id " window)
+        language := RegExMatch(target, "^(en|he|ru)$") ? target : "unknown"
+        mode := behavior = "all" ? "all" : behavior = "selected" ? "selected" : "unknown"
+        WriteAppEvent("INFO", "conversion.started", "request=" this.Request
+            " target=" language " mode=" mode " hwnd=" window " target_pid=" pid
+            " elevated=" (A_IsAdmin ? 1 : 0))
+    }
+
+    static Mark(stage) {
+        if !RegExMatch(stage, "^(field-discovery|text-conversion|keyboard-switch)$")
+            throw ValueError("Unknown conversion diagnostic stage.")
+        this.Stage := stage
+        WriteAppEvent("INFO", "conversion.stage", "request=" this.Request " stage=" stage)
+    }
+
+    static Finish(result) {
+        result := result = "completed" ? "completed" : result = "focus-changed" ? "focus-changed" : "failed"
+        this.Completed += result = "completed", this.Failed += result = "failed"
+        WriteAppEvent(result = "failed" ? "WARN" : "INFO", "conversion.finished",
+            "request=" this.Request " result=" result " stage=" this.Stage
+            " elapsed_ms=" Max(0, GetDiagnosticUptimeMilliseconds() - this.StartedAt))
+        this.StartedAt := 0, this.Stage := "idle"
+    }
+
+    static Snapshot(now := GetDiagnosticUptimeMilliseconds()) {
+        return ("request=" this.Request " stage=" this.Stage
+            " active_ms=" (this.Stage = "idle" ? 0 : Max(0, now - this.StartedAt))
+            " completed=" this.Completed " failed=" this.Failed)
+    }
+}
+
+OpenAppLogsLocation(launch := Run, report := ReportAppLogsLocationFailure) {
+    ; The active writer owns the location; opening it never creates another log
+    ; root or changes privileges. Included tests can supply their private logger.
+    try {
+        directory := AppEventLog.Current ? AppEventLog.Current.Directory : AppEventLog.DefaultDirectory()
+        if !DirExist(directory)
+            throw Error("The logs folder does not exist yet: " directory)
+        launch('"' directory '"')
+        return true
+    } catch Error as failure {
+        WriteAppError("logs.open-failed", failure)
+        report(failure)
+        return false
+    }
+}
+
+ReportAppLogsLocationFailure(failure) {
+    MsgBox("Could not open the logs folder.`n`n" failure.Message,
+        "Ceratops Keyboard Layout", "Icon!")
 }
 
 InitializeAppEventLog(component) {

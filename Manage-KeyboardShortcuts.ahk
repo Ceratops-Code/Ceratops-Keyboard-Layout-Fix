@@ -220,6 +220,9 @@ class KeyboardShortcutManager {
         this.SuppressLeftUp := false
         this.OpenMenu := this.ShowTrayMenu.Bind(this)
         this.OpenSettings := this.ShowSettings.Bind(this)
+        this.PressCount := 0, this.IgnoredHeldCount := 0, this.LastShortcutTick := 0
+        this.LastHeldWarning := -60000
+        this.HealthTimer := this.WriteHealth.Bind(this)
     }
 
     Start() {
@@ -231,6 +234,12 @@ class KeyboardShortcutManager {
         }
         this.ReplaceBindings(this.Assignments)
         this.RebuildTray()
+        WriteAppEvent("INFO", "shortcuts.registered", "bindings=" this.Registered.Count
+            " layouts=" this.Converter.Layouts.Count " elevated=" (A_IsAdmin ? 1 : 0))
+        if AppEventLog.Current {
+            this.WriteHealth()
+            SetTimer(this.HealthTimer, 300000)
+        }
         if warning != ""
             TrayTip(warning, "Ceratops Keyboard Layout")
     }
@@ -269,10 +278,33 @@ class KeyboardShortcutManager {
     }
 
     OnPress(target, key, *) {
-        if this.HeldKeys.Has(key)
+        now := GetDiagnosticUptimeMilliseconds()
+        this.PressCount += 1, this.LastShortcutTick := now
+        if this.HeldKeys.Has(key) {
+            this.IgnoredHeldCount += 1
+            heldMs := Max(0, now - this.HeldKeys[key])
+            if heldMs >= 5000 && now - this.LastHeldWarning >= 60000 {
+                WriteAppEvent("WARN", "shortcut.held-suppressed", "held_ms=" heldMs
+                    " held=" this.HeldKeys.Count " ignored=" this.IgnoredHeldCount)
+                this.LastHeldWarning := now
+            }
             return
-        this.HeldKeys[key] := true
+        }
+        this.HeldKeys[key] := now
         this.AcceptPress(target, WinExist("A"), A_TickCount)
+    }
+
+    WriteHealth(now := GetDiagnosticUptimeMilliseconds()) {
+        oldest := 0
+        for key, since in this.HeldKeys
+            oldest := Max(oldest, Max(0, now - since))
+        WriteAppEvent("INFO", "shortcut.health", "received=" this.PressCount
+            " ignored=" this.IgnoredHeldCount " held=" this.HeldKeys.Count
+            " oldest_held_ms=" oldest " bindings=" this.Registered.Count
+            " layouts=" this.Converter.Layouts.Count " queued=" this.Requests.Length
+            " pending=" (IsObject(this.Pending) ? 1 : 0) " processing=" (this.Processing ? 1 : 0)
+            " since_press_ms=" (this.PressCount ? Max(0, now - this.LastShortcutTick) : 0)
+            " " AppConversionDiagnostics.Snapshot(now))
     }
 
     OnRelease(key, *) {
@@ -402,6 +434,7 @@ class KeyboardShortcutManager {
             A_TrayMenu.Disable(settingsItem)
         A_TrayMenu.Default := settingsItem
         A_TrayMenu.ClickCount := 2
+        A_TrayMenu.Add("Open logs location", (*) => OpenAppLogsLocation())
         A_TrayMenu.Add("Check for updates", (*) => StartAppUpdateCheck(true))
         A_TrayMenu.Add("Force restart Ceratops", StartAppForceRestart)
         if !AppServiceIsInstalled()
