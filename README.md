@@ -25,9 +25,9 @@ text, selection, clipboard, and active keyboard untouched.
 Adding or removing a supported keyboard takes effect on the next conversion
 shortcut, without restarting Ceratops. It reads Windows' available-layout list
 once per request and reuses its conversion tables unless that list changes.
-The installed service checks GitHub every 24 hours and automatically installs a
+The installed service checks GitHub every hour and automatically installs a
 newer stable release without a confirmation or administrator prompt. Its next
-check time survives service and Windows restarts. Missed days cause one check
+check time survives service and Windows restarts. Missed hours cause one check
 when the service resumes. **Check for updates** in the tray menu remains
 available on demand and reports the result.
 Ceratops stays usable during the check and download. The updater checks the
@@ -64,17 +64,29 @@ flag and **WinKey +** adds the Windows key; an empty box disables a shortcut.
 The checkbox has no drawn caption; its separate screen-reader name is **WinKey**,
 so changing display scale cannot expose clipped label fragments beside the flag.
 The tray menu shows the app version. Hovering opens no tooltip or popup.
+The app registers its own tray icon without a tooltip; clearing AutoHotkey's
+tooltip text can leave an empty frame on Windows 11.
 **Force restart Ceratops** restarts the installed service and terminates stuck
 tray processes from this installation. The same command is available in the
 Start Menu when the tray app itself cannot respond; Windows asks for
 administrator permission when needed.
 Upgrades use the recovery worker bundled with the new installer to stop stuck
 old processes before replacing files, then start the new version automatically.
-Operational logs record starts, stops, recovery, upgrades and errors, with no
-typing, converted text or routine shortcut activity. Elevated processes write to
+Operational logs record starts, stops, recovery, upgrades, errors and compact
+conversion diagnostics, with no typed text, window titles or clipboard contents.
+Elevated processes write to
 `%ProgramData%\CeratopsKeyboardLayoutLogs`; ordinary processes use
 `%LocalAppData%\CeratopsKeyboardLayout\Logs`. Each component keeps at most three
 1 MiB files.
+Choose **Open logs location** in the tray menu to open the folder used by the
+running tray process in File Explorer.
+Each conversion has a request number, stage and elapsed time. Keyboard-switch
+records include numeric process/thread/window and layout IDs plus Windows error
+codes. Every five minutes the tray records shortcut receipt, ignored held-key
+counts, queue state and its current conversion stage. The service separately
+records process liveness every ten minutes and changes in exit state immediately.
+These observations do not restart processes or alter conversion behavior; all
+use the same existing three-file limit per component.
 A closer crop of Trixie's green face fills more of the small icon with visible
 artwork, with no keyboard or surrounding padding. Windows controls the tray's
 physical icon size; increasing the image's resolution alone does not enlarge it.
@@ -126,7 +138,7 @@ Text conversion runs locally on your computer. Ceratops does not upload your
 text, clipboard contents, or key events to GitHub, SignPath, or the maintainers.
 Key combinations are stored locally in the shared settings path described above.
 
-The Windows service contacts GitHub once a day and automatically installs newer
+The Windows service contacts GitHub once an hour and automatically installs newer
 stable releases. Manual checks through **Check for updates** ask before installing.
 GitHub receives ordinary connection/request metadata, including your
 IP address, the requested release URL, and the
