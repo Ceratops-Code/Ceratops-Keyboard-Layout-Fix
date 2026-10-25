@@ -51,10 +51,22 @@ Only these fixed component files belong to the logger. Other files are untouched
 Protected logs refuse user-owned folders, junctions, symbolic links and hardlinks.
 Logs contain start/stop, forced termination, upgrade outcomes and error type,
 source location and Windows error number where available. They contain no typed
-text, converted text, clipboard data, exception messages or routine user actions.
+text, converted text, clipboard data, exception messages or raw keypresses.
 Logs remain after uninstall for diagnosis; their total size remains bounded.
 If log storage fails, the application keeps running and reports the log failure
 to Windows Application events (or debugger output if that is also unavailable).
+
+Choose Open logs location in the tray menu to open the running tray process's
+log folder in File Explorer. The icon is registered without a tooltip, so
+Windows cannot leave an empty hover frame after its text has been cleared.
+To investigate a tool that stops responding, keep the tray and service logs from
+that incident. They include conversion request numbers, stage, timing, numeric
+window/process/thread and keyboard-layout IDs, and Windows error codes. A tray
+health record every five minutes shows shortcut receipt, ignored held keys,
+queued work and the active stage; separate service records show process liveness
+every ten minutes and report exit-state changes immediately. These records contain
+no typed text, window titles or clipboard contents and use the same three 1 MiB
+files per component. Held-key warnings are limited to one per minute.
 
 A closer crop of Trixie's green face fills more of the small icon with visible
 artwork, with no keyboard or surrounding padding. Windows controls the tray's
@@ -152,13 +164,13 @@ Updates
 Version 1.0.12 introduces versioned installer filenames. Install it manually
 when upgrading from an earlier release, whose updater expects the previous
 filename. Later automatic updates use a versioned installer for the new version.
-The installed service checks the public GitHub Releases API every 24 hours and
+The installed service checks the public GitHub Releases API every hour and
 automatically installs a newer stable version. It runs the separate update worker
 as SYSTEM, without a confirmation, administrator prompt or foreground dialog.
 The first check runs after installation completes. Restarting Ceratops or Windows
-keeps the next check time; missed days cause one overdue check, without a burst.
-The service claims the day's attempt before launching its worker. An interrupted
-or failed launch counts for that day, is logged, and waits until the next day.
+keeps the next check time; missed hours cause one overdue check, without a burst.
+The service claims the hour's attempt before launching its worker. An interrupted
+or failed launch counts for that hour, is logged, and waits until the next hour.
 Failed network checks and upgrades are also logged without stopping conversion.
 No account is needed. Unpacked source copies cannot upgrade the installed app.
 The check sends no text or clipboard content to GitHub. A Startup fallback without
@@ -183,14 +195,16 @@ or registers the wrong version, the helper reports that the installation may
 be incomplete and directs you to the latest published installer for manual
 repair. It does not download or run the previous installer.
 Service-launched tray copies skip startup update prompts because the service
-owns the daily check. A fallback's immediate upgrade restart also skips its
+owns the hourly check. A fallback's immediate upgrade restart also skips its
 startup check. An existing owned service is kept during an unattended upgrade
 with no signed-in desktop; it launches the tray when someone next signs in.
 
 CeratopsKeyboardLayout-Service.ahk owns NextAutomaticUpdateCheckUtc under its
 Windows service Parameters registry key. This UTC deadline is active schedule
 configuration, separate from observational logs, and is removed with the service.
-The daily worker has a machine-wide check lock and shares the normal upgrade
+A saved deadline more than one hour ahead is shortened to one hour from now;
+an earlier deadline is kept. This also bounds delays after a clock change.
+The hourly worker has a machine-wide check lock and shares the normal upgrade
 lock, so sessions cannot start overlapping automatic upgrades. Checks wait
 while setup holds its restart lock, avoiding a partially updated registration.
 
@@ -333,6 +347,10 @@ Windows must be unlocked for accessibility and foreground shortcut checks.
 Pass --ui-only after the shortcut test's temp-root argument to check the Key
 Combinations dialog, tray menu, double-click and interruption behavior without
 registering global shortcuts, sending keyboard input or stopping the service.
+Tests\Test-TrayInterface.ahk contains the shared native menu, settings and
+physical hover checks included by Tests\Test-ShortcutKeys.ahk.
+Pass --update-schedule-only to check hourly deadlines, saved schedules, calendar
+rollovers, setup locks and interruption boundaries without launching an updater.
 Pass --dispatch-only to check queued requests and owned companion shutdown,
 force restart interruption boundaries, and termination of a suspended child
 while preserving a different script using the same runtime. These checks do
