@@ -726,21 +726,23 @@ ServiceMain(argumentCount, arguments) {
         ownsComApartment := InitializeServiceThreadCom()
         SetServiceState(4, 1 | 4)
         WriteAppEvent("INFO", "service.started")
-        dailyFailure := ""
+        updateScheduleFailure := ""
+        health := CompanionHealthDiagnostics()
         while !ServiceStopRequested {
             try StartMissingCompanions()
             catch Error as failure
                 WriteAppError("companion.scan-failed", failure)
+            health.Record(CompanionProcesses)
             if ServiceStopRequested
                 break
             try {
-                StartDailyAppUpdateIfDue()
-                dailyFailure := ""
+                StartHourlyAppUpdateIfDue()
+                updateScheduleFailure := ""
             } catch Error as failure {
                 identity := Type(failure) ":" failure.Line
-                if identity != dailyFailure
-                    WriteAppError("update.daily-schedule-failed", failure)
-                dailyFailure := identity
+                if identity != updateScheduleFailure
+                    WriteAppError("update.hourly-schedule-failed", failure)
+                updateScheduleFailure := identity
             }
             ; AHK Sleep pumps its pseudo-thread scheduler. In the service
             ; callback that can leave the interrupted service loop suspended
@@ -764,27 +766,33 @@ ServiceMain(argumentCount, arguments) {
 }
 
 ; The schedule is active service configuration, never inferred from log records.
-; Claim a daily attempt before launching: interruption or launch failure counts
-; for that day and is reported, rather than retrying an unknown failure in a loop.
-; A late/resumed service starts one check and skips missed days, without a burst.
-StartDailyAppUpdateIfDue(now := A_NowUTC, operations := DailyAppUpdateOperations()) {
+; Claim an hourly attempt before launching: interruption or launch failure counts
+; for that hour and is reported, rather than retrying an unknown failure in a loop.
+; A late/resumed service starts one check and skips missed hours, without a burst.
+StartHourlyAppUpdateIfDue(now := A_NowUTC, operations := HourlyAppUpdateOperations()) {
+    nextCheck := DateAdd(now, 1, "Hours")
     due := operations.ReadNextCheck()
     if due != "" {
         if !RegExMatch(due, "^\d{14}$")
             throw ValueError("The automatic update schedule is not a UTC timestamp.")
         DateDiff(due, now, "Seconds") ; Reject impossible dates before any effect.
-        if due > now
+        if due > now {
+            ; Bound every saved schedule to the current cadence, including after
+            ; a clock change. Existing later timestamps cannot defer it a day.
+            if due > nextCheck && !operations.InstallationIsBusy()
+                operations.SaveNextCheck(nextCheck)
             return false
+        }
     }
     if operations.InstallationIsBusy()
         return false
-    operations.SaveNextCheck(DateAdd(now, 1, "Days"))
+    operations.SaveNextCheck(nextCheck)
     operations.Launch()
-    WriteAppEvent("INFO", "update.daily-started")
+    WriteAppEvent("INFO", "update.hourly-started")
     return true
 }
 
-class DailyAppUpdateOperations {
+class HourlyAppUpdateOperations {
     InstallationIsBusy() {
         ; Setup retains the restart lock until its registration and copied files
         ; agree. Do not check an old registered version midway through an install.
@@ -825,7 +833,7 @@ class DailyAppUpdateOperations {
     Launch() {
         global ServiceStopRequested
         if ServiceStopRequested
-            throw Error("The service is stopping; the daily update worker was not launched.")
+            throw Error("The service is stopping; the hourly update worker was not launched.")
         directory := GetServiceAppDirectory()
         Run('"' A_WinDir '\System32\WindowsPowerShell\v1.0\powershell.exe"'
             . ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
@@ -855,6 +863,49 @@ SetServiceState(state, acceptedControls := 0, exitCode := 0) {
     }
     DllCall("advapi32\SetServiceStatus", "Ptr", ServiceStatusHandle,
         "Ptr", status, "Int")
+}
+
+ReadCompanionDiagnosticState(handle) {
+    pid := DllCall("GetProcessId", "Ptr", handle, "UInt")
+    state := WaitForCompanionExit(handle, 0)
+    if state = 0x102
+        return {Pid: pid, State: "alive", ExitCode: 0, Code: 0}
+    code := 0
+    if state = 0 && DllCall("GetExitCodeProcess", "Ptr", handle, "UInt*", &code)
+        return {Pid: pid, State: "exited", ExitCode: code, Code: 0}
+    return {Pid: pid, State: "query-failed", ExitCode: 0, Code: A_LastError}
+}
+
+class CompanionHealthDiagnostics {
+    ; The service observes liveness independently of the tray's five-minute
+    ; heartbeat. A live process with a missing tray heartbeat points to a stuck
+    ; event loop. These records never restart a process or override a user's Exit.
+    LastReport := -600000
+    Observed := Map()
+
+    Record(processes, now := GetDiagnosticUptimeMilliseconds(), readState := ReadCompanionDiagnosticState, emit := WriteAppEvent) {
+        due := now - this.LastReport >= 600000
+        for session, handle in processes {
+            state := readState(handle)
+            identity := handle ":" state.State ":" state.ExitCode ":" state.Code
+            if due || !this.Observed.Has(session) || this.Observed[session] != identity {
+                emit(state.State = "alive" || (state.State = "exited" && !state.ExitCode) ? "INFO" : "WARN",
+                    "companion.health", "session=" session " companion_pid=" state.Pid
+                    " state=" state.State " exit_code=" state.ExitCode " code=" state.Code)
+                this.Observed[session] := identity
+            }
+        }
+        forgotten := []
+        for session in this.Observed
+            if !processes.Has(session)
+                forgotten.Push(session)
+        for session in forgotten
+            this.Observed.Delete(session)
+        if due {
+            emit("INFO", "service.health", "companions=" processes.Count)
+            this.LastReport := now
+        }
+    }
 }
 
 StartMissingCompanions() {
