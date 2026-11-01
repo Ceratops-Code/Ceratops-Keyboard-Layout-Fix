@@ -494,6 +494,71 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.github.creations, 0)
 
 
+class TaskTempRootTests(unittest.TestCase):
+    """Keep the shared base separate from each repository and checkout's scratch."""
+
+    def test_configured_and_default_bases_include_project_and_checkout(self) -> None:
+        primary = REPOSITORY.parent / "Example-Project"
+        for configured in (False, True):
+            for checkout in (primary, primary.parent / "worktrees" / primary.name / "example-task"):
+                with self.subTest(configured=configured, checkout=checkout.name):
+                    selected = primary.parent / "shared-temp"
+                    environment = {"CERATOPS_TASK_TEMP_ROOT": str(selected)} if configured else {}
+                    result = subprocess.CompletedProcess([], 0, str(primary / ".git") + "\n", "")
+                    with mock.patch.object(runner, "ROOT", checkout), \
+                         mock.patch.dict(os.environ, environment, clear=True), \
+                         mock.patch.object(runner.subprocess, "run", return_value=result):
+                        expected = (selected if configured else primary.parent / "tmp") / primary.name / checkout.name
+                        self.assertEqual(runner.task_temp_root(), expected)
+                        self.assertEqual(runner.task_temp_root(), expected)
+
+    def test_failed_repository_lookup_creates_no_scratch_or_test_process(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="root-check-", dir=TASK_TEMP_ROOT) as directory:
+            base = pathlib.Path(directory) / "shared-temp"
+            failed = subprocess.CompletedProcess([], 128, "", "repository unavailable")
+            with mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base)}), \
+                 mock.patch.object(runner.subprocess, "run", return_value=failed) as command, \
+                 contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(runner.main(["--suite", "installer"]), 2)
+            self.assertFalse(base.exists())
+            self.assertEqual(command.call_count, 1)
+            self.assertIn("repository unavailable", stderr.getvalue())
+
+    def test_interrupted_runs_reuse_the_same_project_and_checkout_scope(self) -> None:
+        for moment in ("before", "after"):
+            with self.subTest(moment=moment):
+                self.assert_interrupted_run_scope(moment)
+
+    def assert_interrupted_run_scope(self, moment: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="root-check-", dir=TASK_TEMP_ROOT) as directory:
+            base = pathlib.Path(directory) / "shared-temp"
+            primary = pathlib.Path(directory) / "Example-Project"
+            expected = base / primary.name / REPOSITORY.name
+            interrupted = True
+
+            def launch(command: list[str], **options: Any) -> subprocess.CompletedProcess[str]:
+                if command[0] == "git":
+                    return subprocess.CompletedProcess(command, 0, str(primary / ".git") + "\n", "")
+                self.assertEqual(pathlib.Path(options["env"]["PYTEST_DEBUG_TEMPROOT"]), expected)
+                if interrupted and moment == "before":
+                    raise KeyboardInterrupt
+                (expected / "child-effect.txt").write_text("completed", encoding="utf-8")
+                if interrupted:
+                    raise KeyboardInterrupt
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base), "PYTEST_ADDOPTS": ""}), \
+                 mock.patch.object(runner.subprocess, "run", side_effect=launch), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(KeyboardInterrupt):
+                    runner.main(["--suite", "installer"])
+                interrupted = False
+                self.assertEqual(runner.main(["--suite", "installer"]), 0)
+                self.assertEqual(runner.main(["--suite", "installer"]), 0)
+            self.assertEqual((expected / "child-effect.txt").read_text(encoding="utf-8"), "completed")
+            self.assertEqual([path.name for path in base.iterdir()], [primary.name])
+
+
 class TestRunnerTests(unittest.TestCase):
     """Exercise the normal runner entrypoint without executing desktop effects."""
 

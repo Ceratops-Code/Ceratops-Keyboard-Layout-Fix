@@ -10,8 +10,9 @@ overwrites a valid failed or interrupted attempt. CI runs the noninteractive
 updater suite; a local Windows run also requires the desktop suites. The installer
 suite uses pytest to preserve the existing unittest cases.
 
-The caller may select CERATOPS_TASK_TEMP_ROOT. Otherwise scratch is grouped at
-<repo-parent>/tmp/<repo-name>/<checkout-name>. Pytest owns its numbered scratch,
+The caller may select the shared temporary base with CERATOPS_TASK_TEMP_ROOT.
+Otherwise the base is <repo-parent>/tmp. Scratch always adds
+<repo-name>/<checkout-name> beneath that base. Pytest owns its numbered scratch,
 retaining the current run and two predecessors and pruning abandoned outputs
 without deleting live runs. The updater suite owns and removes its private
 subdirectory. Bytecode and pytest's persistent cache are disabled. Final result
@@ -441,16 +442,20 @@ def execution_profile(suite: str) -> str:
 
 
 def task_temp_root() -> pathlib.Path:
-    """Resolve the caller's scratch scope or the current checkout's group."""
-    selected = os.environ.get("CERATOPS_TASK_TEMP_ROOT")
-    if selected:
-        return pathlib.Path(selected).absolute()
+    """Add repository and checkout identity to the shared temporary base.
+
+    Git identifies the primary repository even from a linked worktree. Resolve
+    that identity before any scratch writes so a configured base cannot bypass
+    project isolation or send different checkouts to the same pytest directory.
+    """
     command = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
     if result.returncode:
         raise ValueError(child_failure(command, result.returncode, result.stdout, result.stderr))
     primary = pathlib.Path(result.stdout.strip()).parent
-    return primary.parent / "tmp" / primary.name / ROOT.name
+    selected = os.environ.get("CERATOPS_TASK_TEMP_ROOT")
+    base = pathlib.Path(selected).absolute() if selected else primary.parent / "tmp"
+    return base / primary.name / ROOT.name
 
 
 def child_failure(command: list[str], status: int | str, stdout: str, stderr: str) -> str:
