@@ -38,8 +38,14 @@ if A_Args.Length && A_Args[1] = "--collapse-only" {
 }
 
 ; UIA providers require an accessible desktop even for a background fixture.
-; Stop before creating controls instead of hanging inside the provider on lock.
-if !WinExist("A") {
+; A desktop may have no foreground window after a preceding fixture closes.
+; UOI_IO checks the desktop itself and still blocks before UIA on screen lock.
+; GetThreadDesktop returns a borrowed handle; it must not be closed here.
+desktop := DllCall("GetThreadDesktop", "UInt", DllCall("GetCurrentThreadId", "UInt"), "Ptr")
+receivingInput := Buffer(4, 0)
+if !desktop || !DllCall("GetUserObjectInformationW", "Ptr", desktop, "Int", 6,
+    "Ptr", receivingInput.Ptr, "UInt", receivingInput.Size, "Ptr", 0, "Int")
+    || !NumGet(receivingInput, 0, "Int") {
     try FileAppend("BLOCKED: Unlock Windows before running accessibility checks.`n", "*")
     ExitApp(2)
 }

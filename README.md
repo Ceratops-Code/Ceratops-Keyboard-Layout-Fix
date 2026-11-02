@@ -179,5 +179,11 @@ test action runs updater checks in CI and adds the interactive Windows suites
 locally. The installer package test action runs the existing Python cases through
 pytest. CI invokes the same SDLC test actions through the pinned Ceratops action.
 Python tooling uses the locked Python 3.14 environment under `scripts`.
+Test scratch is grouped at `<temporary-base>/<repository-name>/<checkout-name>/`.
+`CERATOPS_TASK_TEMP_ROOT` selects the shared temporary base; its default is
+`<repo-parent>/tmp`. The runner always adds the primary repository name and the
+current checkout name, including when the base is supplied by Codex or CI.
+Pytest keeps the current numbered scratch directory and two predecessors;
+the updater suite removes its private scratch directory when it finishes.
 `Tests/Test-AppUpdates.ps1` checks release selection, consent, download integrity,
 setup failure reporting and cache cleanup without installing software.
