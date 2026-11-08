@@ -105,20 +105,24 @@ def extract_executable(payload: bytes, archive: str, executable: str) -> bytes:
 
 
 def download_archive(archive: str, digest: str) -> bytes:
-    """Download a bounded official asset, retrying one gateway timeout."""
+    """Download a bounded official asset, retrying one transfer timeout."""
 
     url = f"https://github.com/rhysd/actionlint/releases/download/v{VERSION}/{archive}"
     request = urllib.request.Request(url, headers={"User-Agent": "ceratops-actionlint-runner"})
+
+    def read_asset() -> bytes:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read(MAX_ARCHIVE_BYTES + 1)
+
     try:
-        response = urllib.request.urlopen(request, timeout=60)
-    except urllib.error.HTTPError as error:
-        if error.code != 504:
-            raise
-        error.close()
+        payload = read_asset()
+    except (TimeoutError, urllib.error.HTTPError) as error:
+        if isinstance(error, urllib.error.HTTPError):
+            if error.code != 504:
+                raise
+            error.close()
         time.sleep(2)
-        response = urllib.request.urlopen(request, timeout=60)
-    with response:
-        payload = response.read(MAX_ARCHIVE_BYTES + 1)
+        payload = read_asset()
     if len(payload) > MAX_ARCHIVE_BYTES:
         raise RuntimeError("actionlint archive exceeds the size limit")
     if hashlib.sha256(payload).hexdigest() != digest:
