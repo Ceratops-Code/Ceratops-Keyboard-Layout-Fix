@@ -34,4 +34,7 @@ jobs:
         with:
           if-no-files-found: ignore
           name: repository-validation-evidence
-          path: ${{ runner.temp }}/repository-validation.log
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/repository-validation.log
+            .build/deploy-validation/repository-validation.log
