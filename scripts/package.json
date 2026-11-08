@@ -15,6 +15,9 @@
     "re2js": "2.8.7",
     "js-yaml": "5.4.3",
     "katex": "0.18.2",
-    "smol-toml": "1.9.0"
+    "smol-toml": "1.9.0",
+    "markdownlint-cli@0.50.0": {
+      "minimatch": "11.0.1"
+    }
   }
 }
