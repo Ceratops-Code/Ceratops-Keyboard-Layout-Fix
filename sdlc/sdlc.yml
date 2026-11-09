@@ -1,4 +1,4 @@
-version: 4
+version: 5
 kind: ceratops-sdlc
 repository:
   capabilities:
@@ -31,38 +31,9 @@ repository:
             - --project
             - scripts
             - --locked
-    validate:
-      requires:
-        capabilities:
-          - uv
-      steps:
-        - run:
-            - uv
-            - run
-            - --locked
-            - scripts/validate-repository.py
-    test:
-      requires:
-        capabilities:
-          - uv
-          - powershell-core
-      steps:
-        - run:
-            - uv
-            - run
-            - --locked
-            - scripts/run-tests.py
-deliverables:
-  packages:
-    ceratops-keyboard-layout-installer:
-      source: .
-      prerequisites: []
-      artifact:
-        type: windows-installer
-        output-directory: .
-        filename-pattern: CeratopsKeyboardLayout-Setup-*.exe
-      actions:
-        test:
+    pre-build-checks:
+      check-groups:
+        source:
           requires:
             capabilities:
               - uv
@@ -71,9 +42,42 @@ deliverables:
                 - uv
                 - run
                 - --locked
+                - scripts/validate-repository.py
+        tests:
+          requires:
+            capabilities:
+              - uv
+              - powershell-core
+          steps:
+            - run:
+                - uv
+                - run
+                - --locked
                 - scripts/run-tests.py
-                - --suite
-                - installer
+deliverables:
+  packages:
+    ceratops-keyboard-layout-installer:
+      root-dir: .
+      build-after: []
+      artifact:
+        type: windows-installer
+        output-directory: .
+        filename-pattern: CeratopsKeyboardLayout-Setup-*.exe
+      actions:
+        pre-build-checks:
+          check-groups:
+            tests:
+              requires:
+                capabilities:
+                  - uv
+              steps:
+                - run:
+                    - uv
+                    - run
+                    - --locked
+                    - scripts/run-tests.py
+                    - --suite
+                    - installer
         build:
           requires:
             capabilities:
@@ -109,21 +113,23 @@ deliverables:
                 - publish
   apps:
     ceratops-keyboard-layout:
-      source: .
+      root-dir: .
       manifest: CeratopsKeyboardLayout-Setup.iss
-      prerequisites:
-        - ceratops-keyboard-layout-installer
+      build-after:
+        - deliverables.packages.ceratops-keyboard-layout-installer
       actions:
-        validate:
-          requires:
-            capabilities: []
-          no-op: Repository validation runs separately; no app-only validation is
-            declared.
-        test:
-          requires:
-            capabilities: []
-          no-op: Repository tests run separately; the desktop hotkey check runs locally
-            before release.
+        pre-build-checks:
+          check-groups:
+            source:
+              requires:
+                capabilities: []
+              no-op: Repository validation runs separately; no app-only validation is
+                declared.
+            tests:
+              requires:
+                capabilities: []
+              no-op: Repository tests run separately; the desktop hotkey check runs locally
+                before release.
         install:
           requires:
             capabilities:
