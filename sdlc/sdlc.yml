@@ -1,13 +1,12 @@
 version: 5
 kind: ceratops-sdlc
 repository:
-  capabilities:
+  tools:
     uv:
       executable: uv
     windows:
       executable: powershell
-      platforms:
-        - windows
+      platforms: [windows]
     powershell-core:
       executable: pwsh
     inno-setup:
@@ -15,45 +14,88 @@ repository:
       version-from:
         file: dependencies.json
         key: InnoSetup
-      platforms:
-        - windows
+      platforms: [windows]
     github-cli:
       executable: gh
+    python:
+      executable: python
+      version-from:
+        file: scripts/pyproject.toml
+        key: project.requires-python
+    node:
+      executable: node
+      version-from:
+        file: scripts/package.json
+        key: engines.node
+    npm:
+      executable: npm
   actions:
     bootstrap:
       requires:
-        capabilities:
-          - uv
+        tools: [uv, node, npm]
       steps:
-        - run:
-            - uv
-            - sync
-            - --project
-            - scripts
-            - --locked
+        - run: [uv, sync, --project, scripts, --locked]
+        - run: [npm, ci, --prefix, scripts]
     pre-build-checks:
       check-groups:
-        source:
+        npm-markdown-lint:
           requires:
-            capabilities:
-              - uv
+            tools: [node, npm]
+          validation-tools: [npm-markdown-lint]
+          check-results:
+            result-owner: operation
+            product-inputs: ['**/*.md']
+            check-inputs: [sdlc/sdlc.yml, scripts/package.json, scripts/.markdownlint.json]
+            dependencies: [scripts/package-lock.json]
+            tools: [node, npm]
           steps:
-            - run:
-                - uv
-                - run
-                - --locked
-                - scripts/validate-repository.py
+            - run: [npm, --prefix, scripts, run, lint:markdown]
+        ruff:
+          requires:
+            tools: [uv, python]
+          validation-tools: [ruff]
+          check-results:
+            result-owner: operation
+            product-inputs: ['**/*.py', '**/*.pyi', '**/*.ipynb']
+            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
+            dependencies: [scripts/uv.lock]
+            environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE]
+            tools: [uv, python]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, -m, ruff, check, ., --config, scripts/pyproject.toml]
+        mypy:
+          requires:
+            tools: [uv, python]
+          validation-tools: [mypy]
+          check-results:
+            result-owner: operation
+            product-inputs: ['**/*.py', '**/*.pyi', '**/*.ipynb']
+            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
+            dependencies: [scripts/uv.lock]
+            environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE, MYPYPATH]
+            tools: [uv, python]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, -m, mypy, --config-file, scripts/pyproject.toml]
+        actionlint:
+          requires:
+            tools: [uv, python]
+          validation-tools: [actionlint]
+          check-results:
+            result-owner: operation
+            product-inputs: [.github/workflows/*.yml, .github/workflows/*.yaml, .github/actions/**]
+            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, scripts/run-actionlint.py, .github/actionlint.yaml,
+                  .github/actionlint.yml]
+            dependencies: [scripts/uv.lock]
+            environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH,
+                  GITHUB_ACTIONS]
+            tools: [uv, python]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, scripts/run-actionlint.py]
         tests:
           requires:
-            capabilities:
-              - uv
-              - powershell-core
+            tools: [uv, powershell-core]
           steps:
-            - run:
-                - uv
-                - run
-                - --locked
-                - scripts/run-tests.py
+            - run: [uv, run, --locked, scripts/run-tests.py]
 deliverables:
   packages:
     ceratops-keyboard-layout-installer:
@@ -68,49 +110,19 @@ deliverables:
           check-groups:
             tests:
               requires:
-                capabilities:
-                  - uv
+                tools: [uv]
               steps:
-                - run:
-                    - uv
-                    - run
-                    - --locked
-                    - scripts/run-tests.py
-                    - --suite
-                    - installer
+                - run: [uv, run, --locked, scripts/run-tests.py, --suite, installer]
         build:
           requires:
-            capabilities:
-              - uv
-              - windows
-              - inno-setup
+            tools: [uv, windows, inno-setup]
           steps:
-            - run:
-                - uv
-                - run
-                - --project
-                - scripts
-                - --locked
-                - python
-                - scripts/release-installer.py
-                - build
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build]
         publish:
           requires:
-            capabilities:
-              - uv
-              - windows
-              - inno-setup
-              - github-cli
+            tools: [uv, windows, inno-setup, github-cli]
           steps:
-            - run:
-                - uv
-                - run
-                - --project
-                - scripts
-                - --locked
-                - python
-                - scripts/release-installer.py
-                - publish
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish]
   apps:
     ceratops-keyboard-layout:
       root-dir: .
@@ -122,27 +134,14 @@ deliverables:
           check-groups:
             source:
               requires:
-                capabilities: []
-              no-op: Repository validation runs separately; no app-only validation is
-                declared.
+                tools: []
+              no-op: Repository validation runs separately; no app-only validation is declared.
             tests:
               requires:
-                capabilities: []
-              no-op: Repository tests run separately; the desktop hotkey check runs locally
-                before release.
+                tools: []
+              no-op: Repository tests run separately; the desktop hotkey check runs locally before release.
         install:
           requires:
-            capabilities:
-              - uv
-              - windows
-              - inno-setup
+            tools: [uv, windows, inno-setup]
           steps:
-            - run:
-                - uv
-                - run
-                - --project
-                - scripts
-                - --locked
-                - python
-                - scripts/release-installer.py
-                - install
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install]
