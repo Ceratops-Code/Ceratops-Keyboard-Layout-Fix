@@ -22,11 +22,16 @@ jobs:
         run: npm --prefix scripts ci
       # Interactive AutoHotkey tests run on a Windows desktop before release.
       - name: Run SDLC repository checks and tests
-        uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@c0b07f52f2448d61577e17567366c7c54ccc2752 # revision c0b07f52f244
+        uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@315e68f6b915781a8e36f12bc97206a552eed4a3 # revision 315e68f6b915
         with:
           repo-root: ${{ github.workspace }}
           evidence-file: ${{ runner.temp }}/repository-validation.log
-          run-tests: "true"
+          operations: |
+            repository.actions.pre-build-checks.check-groups.source
+            deliverables.apps.ceratops-keyboard-layout.actions.pre-build-checks.check-groups.source
+            repository.actions.pre-build-checks.check-groups.tests
+            deliverables.packages.ceratops-keyboard-layout-installer.actions.pre-build-checks.check-groups.tests
+            deliverables.apps.ceratops-keyboard-layout.actions.pre-build-checks.check-groups.tests
 
       - name: Upload validation evidence
         if: failure()
