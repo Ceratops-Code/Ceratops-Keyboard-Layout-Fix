@@ -38,7 +38,7 @@ jobs:
         run: npm --prefix scripts ci
       # Interactive AutoHotkey tests run on a Windows desktop before release.
       - name: Run SDLC repository checks and tests
-        uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@1a6ce3995e79b5adc5fa02301e0389e7e9eca500 # revision 1a6ce3995e79
+        uses: Ceratops-Code/Ceratops-AI-Agents-Kit/skills/ceratops-repo-lifecycle/scripts@5a9e06090729e3967497cb7be8680dac481e63e7 # revision 1a6ce3995e79
         with:
           repo-root: ${{ github.workspace }}
           evidence-file: ${{ runner.temp }}/repository-validation.log
