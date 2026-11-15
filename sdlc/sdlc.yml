@@ -95,7 +95,7 @@ repository:
           requires:
             tools: [uv, powershell-core]
           steps:
-            - run: [uv, run, --locked, scripts/run-tests.py]
+            - run: [uv, run, --project, scripts, --locked, python, scripts/run-tests.py]
 deliverables:
   packages:
     ceratops-keyboard-layout-installer:
@@ -112,7 +112,7 @@ deliverables:
               requires:
                 tools: [uv]
               steps:
-                - run: [uv, run, --locked, scripts/run-tests.py, --suite, installer]
+                - run: [uv, run, --project, scripts, --locked, python, scripts/run-tests.py, --suite, installer]
         build:
           requires:
             tools: [uv, windows, inno-setup]
