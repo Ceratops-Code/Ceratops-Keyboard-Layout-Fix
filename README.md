@@ -177,7 +177,7 @@ The [user guide](README.txt) lists the desktop regression checks.
 `scripts/run-tests.py` owns test selection and result receipts. The repository
 test action runs updater checks in CI and adds the interactive Windows suites
 locally. The installer package test action runs the existing Python cases through
-pytest. CI invokes the same SDLC test actions through the pinned Ceratops action.
+pytest. CI calls the same test launcher for the repository and installer suites.
 Python tooling uses the locked Python 3.14 environment under `scripts`.
 Test scratch is grouped at `<temporary-base>/<repository-name>/<checkout-name>/`.
 `CERATOPS_TASK_TEMP_ROOT` selects the shared temporary base; its default is

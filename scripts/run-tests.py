@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run SDLC's repository or installer tests with Ceratops result receipts.
 
-Use the locked scripts environment: uv run --locked scripts/run-tests.py.
+Use the locked scripts environment: uv run --project scripts --locked python scripts/run-tests.py.
 The caller owns result identities, serialization, storage and retention. Without
 result arguments this remains a disposable test invocation. With them, the runner
 writes only the chosen final file, never a sibling staging file. The running
