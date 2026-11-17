@@ -45,7 +45,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: ['**/*.md']
-            check-inputs: [sdlc/sdlc.yml, scripts/package.json, scripts/.markdownlint.json]
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/package.json, scripts/.markdownlint.json]
             dependencies: [scripts/package-lock.json]
             tools: [node, npm]
           steps:
@@ -57,7 +57,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: ['**/*.py', '**/*.pyi', '**/*.ipynb']
-            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
             dependencies: [scripts/uv.lock]
             environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE]
             tools: [uv, python]
@@ -70,7 +70,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: ['**/*.py', '**/*.pyi', '**/*.ipynb']
-            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
             dependencies: [scripts/uv.lock]
             environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE, MYPYPATH]
             tools: [uv, python]
@@ -83,7 +83,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: [.github/workflows/*.yml, .github/workflows/*.yaml, .github/actions/**]
-            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, scripts/run-actionlint.py, .github/actionlint.yaml,
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/pyproject.toml, scripts/run-actionlint.py, .github/actionlint.yaml,
                   .github/actionlint.yml]
             dependencies: [scripts/uv.lock]
             environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH,

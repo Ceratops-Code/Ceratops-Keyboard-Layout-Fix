@@ -173,8 +173,9 @@ Ceratops owns operation selection and order. Shipping selects package publicatio
 before local installation; the repository adapter performs each selected effect.
 Building alone does not publish or install it.
 The [user guide](README.txt) lists the desktop regression checks.
-`sdlc/sdlc.yml` is the operation contract. Ceratops executes its named operations;
-`scripts/run-tests.py` owns test selection and result receipts. The repository
+`.ceratops/sdlc/sdlc.yml` is the operation contract. Ceratops executes its named
+operations; `scripts/run-tests.py` owns test selection and result receipts. The
+repository
 test action runs updater checks in CI and adds the interactive Windows suites
 locally. The installer package test action runs the existing Python cases through
 pytest. CI calls the same test launcher for the repository and installer suites.

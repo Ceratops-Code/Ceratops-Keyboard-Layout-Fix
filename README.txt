@@ -270,7 +270,7 @@ The app's SDLC install action consumes the successful build and runs setup
 silently from an administrator terminal. Ceratops owns operation selection and
 order; shipping selects publication before local installation. The repository
 adapter performs each selected effect. Building does not install or publish it.
-The sdlc/sdlc.yml contract declares the operations selected by Ceratops. Its
+The .ceratops/sdlc/sdlc.yml contract declares the operations selected by Ceratops. Its
 repository and installer test actions use scripts/run-tests.py locally and in
 CI. Repository tests cover the updater; local Windows runs also require the
 interactive desktop suites. Installer cases run through pytest in the locked
