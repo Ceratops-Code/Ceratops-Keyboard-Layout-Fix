@@ -516,7 +516,7 @@ class TaskTempRootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="root-check-", dir=TASK_TEMP_ROOT) as directory:
             base = pathlib.Path(directory) / "shared-temp"
             failed = subprocess.CompletedProcess([], 128, "", "repository unavailable")
-            with mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base)}), \
+            with mock.patch("write_check_results.CurrentCheckResults"), mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base)}), \
                  mock.patch.object(runner.subprocess, "run", return_value=failed) as command, \
                  contextlib.redirect_stderr(io.StringIO()) as stderr:
                 self.assertEqual(runner.main(["--suite", "installer"]), 2)
@@ -547,7 +547,7 @@ class TaskTempRootTests(unittest.TestCase):
                     raise KeyboardInterrupt
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            with mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base), "PYTEST_ADDOPTS": ""}), \
+            with mock.patch("write_check_results.CurrentCheckResults"), mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base), "PYTEST_ADDOPTS": ""}), \
                  mock.patch.object(runner.subprocess, "run", side_effect=launch), \
                  contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(KeyboardInterrupt):
@@ -566,6 +566,7 @@ class TestRunnerTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="runner-check-", dir=TASK_TEMP_ROOT)
         self.addCleanup(temporary.cleanup)
         self.root = pathlib.Path(temporary.name)
+        self.enterContext(mock.patch("write_check_results.CurrentCheckResults"))
         self.enterContext(mock.patch.object(runner, "task_temp_root", return_value=self.root / "scratch"))
         self.enterContext(mock.patch.object(runner.platform, "system", return_value="Windows"))
         self.enterContext(mock.patch.object(runner.shutil, "which", return_value="pwsh"))

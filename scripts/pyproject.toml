@@ -39,3 +39,7 @@ warn_unused_configs = true
 [tool.ceratops.test-runner]
 # The template supplies result receipts; this repository owns platform tasks.
 managed = false
+
+[tool.ceratops.test-support]
+managed = true
+result-module = "scripts/write_check_results.py"
