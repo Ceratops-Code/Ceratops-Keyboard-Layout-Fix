@@ -99,7 +99,37 @@ repository:
 deliverables:
   packages:
     ceratops-keyboard-layout-installer:
-      version: &ceratops-keyboard-layout-installer-version
+      version: {mode: receipt-only}
+      root-dir: .
+      build-after: []
+      artifact:
+        type: windows-installer
+        # Standalone output. The build action below uses its allocated artifact_directory.
+        output-directory: .
+        filename-pattern: CeratopsKeyboardLayout-Setup-*.exe
+      actions:
+        pre-build-checks:
+          check-groups:
+            tests:
+              requires:
+                tools: [uv]
+              steps:
+                - run: [uv, run, --project, scripts, --locked, python, scripts/run-tests.py, --suite, installer]
+        build:
+          parameters: [artifact_directory]
+          result-schema: ceratops-builder-output
+          requires:
+            tools: [uv, windows, inno-setup]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --artifact-directory, '{artifact_directory}', --receipt-file, '{build_receipt}']
+        publish:
+          requires:
+            tools: [uv, windows, github-cli]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish, --accepted-artifacts, '{artifacts}']
+  apps:
+    ceratops-keyboard-layout:
+      version:
         read:
           - "{python}"
           - "-c"
@@ -135,33 +165,6 @@ deliverables:
         files:
           - "CeratopsKeyboardLayout-Setup.iss"
       root-dir: .
-      build-after: []
-      artifact:
-        type: windows-installer
-        output-directory: .
-        filename-pattern: CeratopsKeyboardLayout-Setup-*.exe
-      actions:
-        pre-build-checks:
-          check-groups:
-            tests:
-              requires:
-                tools: [uv]
-              steps:
-                - run: [uv, run, --project, scripts, --locked, python, scripts/run-tests.py, --suite, installer]
-        build:
-          requires:
-            tools: [uv, windows, inno-setup]
-          steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --build-dir, &installer-build-dir build/installer, --receipt-file, '{build_receipt}']
-        publish:
-          requires:
-            tools: [uv, windows, inno-setup, github-cli]
-          steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish, --build-dir, *installer-build-dir]
-  apps:
-    ceratops-keyboard-layout:
-      version: *ceratops-keyboard-layout-installer-version
-      root-dir: .
       manifest: CeratopsKeyboardLayout-Setup.iss
       build-after:
         - deliverables.packages.ceratops-keyboard-layout-installer
@@ -178,6 +181,6 @@ deliverables:
               no-op: Repository tests run separately; the desktop hotkey check runs locally before release.
         install:
           requires:
-            tools: [uv, windows, inno-setup]
+            tools: [uv, windows]
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install, --build-dir, *installer-build-dir]
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install, --accepted-artifacts, '{artifacts}']

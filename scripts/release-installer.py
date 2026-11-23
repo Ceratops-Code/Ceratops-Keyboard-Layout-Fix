@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Build, publish, or install the standalone Windows setup through SDLC.
 
+Ceratops gives the package build an output directory and receives the installer,
+its corresponding source archive, and the native release manifest. Install and
+publish consume those accepted files directly. The standalone build cache below
+belongs only to direct invocations.
+
 Inno Setup owns compilation and installation; gh owns GitHub authentication and
-uploads. Build, publish, and install share the directory passed as --build-dir
+uploads. Standalone commands share the directory passed as --build-dir
 (relative to the primary checkout), which defaults to build/installer.
 Each completed bundle holds its installer, source archive, and receipt.json.
 Packaging inputs, not test or CI edits, identify a build. Only integrity checks
@@ -270,15 +275,17 @@ def source_archive(root: pathlib.Path, dependencies: Mapping[str, str], output: 
         raise ReleaseError("The AutoHotkey source archive does not match its pinned checksum.")
 
 
-def read_build(bundle: pathlib.Path, identity: str) -> dict[str, Any]:
+def read_build(bundle: pathlib.Path, identity: str | None, *, accepted_names: set[str] | None = None) -> dict[str, Any]:
     try:
         record = json.loads((bundle / "receipt.json").read_text(encoding="utf-8"))
-        if record["schema"] != BUILD_SCHEMA or record["identity"] != identity:
+        if record["schema"] != BUILD_SCHEMA or (identity is not None and record["identity"] != identity):
             raise ReleaseError("The installer build receipt belongs to another build.")
         if not re.fullmatch(r"\d+\.\d+\.\d+", record["version"]) or not isinstance(record["artifacts"], dict):
             raise ReleaseError("The installer build receipt has invalid metadata.")
+        if accepted_names is not None and accepted_names != set(record["artifacts"]) | {"receipt.json"}:
+            raise ReleaseError("The accepted installer files differ from the package manifest.")
         for name, digest in record["artifacts"].items():
-            if pathlib.PureWindowsPath(name).name != name or file_digest(bundle / name) != digest:
+            if pathlib.PureWindowsPath(name).name != name or (accepted_names is None and file_digest(bundle / name) != digest):
                 raise ReleaseError("A completed installer artifact changed after its build.")
         if installer_filename(record["version"]) not in record["artifacts"]:
             raise ReleaseError("The completed build has no installer.")
@@ -334,15 +341,15 @@ def source_snapshot(root: pathlib.Path, store: pathlib.Path, commit: str) -> Ite
 
 def build_installer(
     root: pathlib.Path, store: pathlib.Path, compiler: pathlib.Path,
-    dependencies: Mapping[str, str], commit: str,
+    dependencies: Mapping[str, str], commit: str, *, output_directory: pathlib.Path | None = None,
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     with source_snapshot(root, store, commit) as (staging, snapshot):
         version = source_version(snapshot)
         setup_name = installer_filename(version)
         inputs = packaging_inputs(snapshot, compiler)
         identity = build_identity(inputs, dependencies["InnoSetup"])
-        bundle = store / identity
-        if bundle.exists():
+        bundle = output_directory if output_directory is not None else store / identity
+        if output_directory is None and bundle.exists():
             record = read_build(bundle, identity)
         else:
             result = run_command([str(compiler), f"/O{staging}", SETUP_SCRIPT], snapshot)
@@ -361,9 +368,15 @@ def build_installer(
             }
             (staging / "receipt.json").write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
             remove_bundle(staging, snapshot)
-            staging.rename(bundle)
-    activate_installer(root, bundle, record)
-    retain_builds(store, bundle)
+            if output_directory is None:
+                staging.rename(bundle)
+            else:
+                # The caller owns this attempt. Only the files named in its result leave staging.
+                for name in (*record["artifacts"], "receipt.json"):
+                    os.replace(staging / name, bundle / name)
+    if output_directory is None:
+        activate_installer(root, bundle, record)
+        retain_builds(store, bundle)
     return bundle, record
 
 
@@ -459,25 +472,55 @@ def main() -> int:
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1])
     parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path("build/installer"))
     parser.add_argument("--receipt-file", type=pathlib.Path, help="Write the result of the build action to this file.")
+    parser.add_argument("--artifact-directory", type=pathlib.Path, help="Write this build to the caller's allocated directory.")
+    parser.add_argument("--accepted-artifacts", help="Install or publish these accepted package files.")
     args = parser.parse_args()
+    if args.artifact_directory is not None and (args.action != "build" or args.receipt_file is None):
+        parser.error("--artifact-directory requires build and --receipt-file")
+    if args.accepted_artifacts is not None and args.action == "build":
+        parser.error("--accepted-artifacts requires install or publish")
     if args.receipt_file and args.action != "build":
         parser.error("--receipt-file requires the build action")
     root = args.repo_root.resolve()
     try:
-        store = build_store(root, args.build_dir)
+        if args.accepted_artifacts is not None:
+            mapping = json.loads(args.accepted_artifacts)
+            paths = mapping.get("deliverables.packages.ceratops-keyboard-layout-installer") if isinstance(mapping, dict) else None
+            if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
+                raise ReleaseError("The accepted keyboard installer package is missing.")
+            files = [pathlib.Path(path) for path in paths]
+            bundle = files[0].parent
+            if not all(path.is_absolute() and path.parent == bundle and path.is_file() for path in files):
+                raise ReleaseError("Expected files from one accepted keyboard installer package.")
+            names = {path.name for path in files}
+            if len(names) != len(files) or "receipt.json" not in names:
+                raise ReleaseError("The accepted installer package requires its native manifest.")
+            record = read_build(bundle, None, accepted_names=names)
+            if args.action == "publish":
+                publish_installer(root, bundle, record, record["source_commit"])
+            else:
+                run_command([str(bundle / installer_filename(record["version"])), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], root)
+            print("OK")
+            return 0
+        store = args.artifact_directory.resolve(strict=True) if args.artifact_directory else build_store(root, args.build_dir)
         commit = source_commit(root, store)
         dependencies = json.loads(git_output(root, "show", f"{commit}:dependencies.json"))
         compiler = compiler_path(root, dependencies["InnoSetup"])
-        with locked_store(store):
-            # An older checked-out release may have an accepted output with an
-            # older mtime. Protect that exact version even if later work fails.
-            current = root / installer_filename(source_version(root, commit))
-            retain_checkout_installers(root, current)
+        with (contextlib.nullcontext() if args.artifact_directory else locked_store(store)):
+            if args.artifact_directory is None:
+                # The standalone activated installer belongs to its checkout.
+                current = root / installer_filename(source_version(root, commit))
+                retain_checkout_installers(root, current)
             if args.action == "build":
-                bundle, record = build_installer(root, store, compiler, dependencies, commit)
+                bundle, record = build_installer(root, store, compiler, dependencies, commit,
+                                                output_directory=store if args.artifact_directory else None)
                 if args.receipt_file:
-                    result = {"schema": BUILD_SCHEMA, "status": "passed", "bundle": str(bundle),
-                              "version": record["version"], "artifacts": record["artifacts"]}
+                    setup = installer_filename(record["version"])
+                    outputs = [{"type": "windows-installer" if name == setup else "source-archive", "path": name}
+                               for name in record["artifacts"]]
+                    outputs.append({"type": "build-manifest", "path": "receipt.json"})
+                    result = {"schema": "ceratops-builder-output", "status": "passed",
+                              "installationArtifactPath": setup, "artifacts": outputs}
                     args.receipt_file.write_text(json.dumps(result) + "\n", encoding="utf-8")
             else:
                 with source_snapshot(root, store, commit) as (_, snapshot):

@@ -123,7 +123,35 @@ class BuildTests(unittest.TestCase):
                                               "--receipt-file", str(receipt)]):
             self.assertEqual(release.main(), 0)
         find_store.assert_called_once_with(self.root, pathlib.Path("build/installer"))
-        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["artifacts"], record["artifacts"])
+        self.assertEqual({entry["path"] for entry in json.loads(receipt.read_text(encoding="utf-8"))["artifacts"]},
+                         set(record["artifacts"]) | {"receipt.json"})
+
+        allocated = self.root / "allocated"
+        allocated.mkdir()
+        (self.root / self.setup_name).unlink()
+        with (mock.patch.object(release, "source_commit", return_value=record["source_commit"]),
+              mock.patch.object(release, "compiler_path", return_value=self.compiler),
+              mock.patch.object(sys, "argv", ["builder", "build", "--repo-root", str(self.root),
+                                             "--artifact-directory", str(allocated), "--receipt-file", str(receipt)])):
+            for _ in range(2):
+                self.assertEqual(release.main(), 0)
+        output = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual((output["schema"], output["installationArtifactPath"]),
+                         ("ceratops-builder-output", self.setup_name))
+        artifacts = [str(allocated / entry["path"]) for entry in output["artifacts"]]
+        self.assertEqual(set(artifacts), {str(path) for path in allocated.iterdir()})
+        self.assertFalse((self.root / self.setup_name).exists())
+        accepted = json.dumps({"deliverables.packages.ceratops-keyboard-layout-installer": artifacts})
+        with (mock.patch.object(release, "source_commit", side_effect=AssertionError("unexpected checkout access")),
+              mock.patch.object(release, "compiler_path", side_effect=AssertionError("unexpected build")),
+              mock.patch.object(release, "publish_installer") as publish):
+            for action in ("install", "publish"):
+                with mock.patch.object(sys, "argv", ["delivery", action, "--repo-root", str(self.root),
+                                                    "--accepted-artifacts", accepted]):
+                    self.assertEqual(release.main(), 0)
+            self.assertEqual(publish.call_args.args[1], allocated)
+            self.assertEqual(publish.call_args.args[3], record["source_commit"])
+        self.command.assert_any_call([str(allocated / self.setup_name), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], self.root)
 
         with mock.patch.object(release, "git_output", side_effect=[
             f"?? cache/{bundle.name}/receipt.json\0", record["source_commit"],
