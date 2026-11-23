@@ -115,6 +115,15 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(release.read_build(bundle, record["identity"]), record)
         self.assertFalse(any(p.name.startswith(".staging-") for p in self.store.iterdir()))
 
+        with mock.patch.object(release, "git_output", side_effect=[
+            f"?? cache/{bundle.name}/receipt.json\0", record["source_commit"],
+        ]):
+            self.assertEqual(release.source_commit(self.root, self.store), record["source_commit"])
+        for change in ("?? payload.txt\0", f" M cache/{bundle.name}/receipt.json\0"):
+            with mock.patch.object(release, "git_output", return_value=change):
+                with self.assertRaisesRegex(release.ReleaseError, "Commit source changes"):
+                    release.source_commit(self.root, self.store)
+
     def test_test_only_commit_reuses_completed_build_without_compilation(self) -> None:
         first, record = self.build()
         (self.root / "Tests").mkdir()

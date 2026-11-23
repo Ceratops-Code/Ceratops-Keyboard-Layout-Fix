@@ -2,9 +2,11 @@
 """Build, publish, or install the standalone Windows setup through SDLC.
 
 Inno Setup owns compilation and installation; gh owns GitHub authentication and
-uploads. This adapter keeps successful build bundles under the primary checkout's
-.build/installer directory so linked worktrees share them. Packaging inputs, not
-test or CI edits, identify a build. Only integrity checks are repeated on reuse.
+uploads. Build, publish, and install share the directory passed as --build-dir
+(relative to the primary checkout), which defaults to .build/installer.
+Each completed bundle holds its installer, source archive, and receipt.json.
+Packaging inputs, not test or CI edits, identify a build. Only integrity checks
+are repeated on reuse.
 The directory has one exclusive lock, at most three completed bundles, and no
 operational log. Private incomplete bundles are removed under the lock at startup
 and on failure. Each checkout keeps its current versioned installer and at most
@@ -100,17 +102,23 @@ def git_output(root: pathlib.Path, *args: str) -> str:
     return run_command(["git", *args], root).stdout.decode("utf-8").strip()
 
 
-def source_commit(root: pathlib.Path) -> str:
-    """Do not label a build with a commit that omits local source changes."""
-    if git_output(root, "status", "--porcelain"):
+def source_commit(root: pathlib.Path, store: pathlib.Path) -> str:
+    """Require committed source while allowing visible installer output in its directory."""
+    changes = git_output(root, "status", "--porcelain", "--untracked-files=all", "-z")
+    for change in changes.split("\0"):
+        if not change:
+            continue
+        if change.startswith("?? ") and (root / change[3:]).is_relative_to(store):
+            continue
         raise ReleaseError("Commit source changes before building or releasing the installer.")
     return git_output(root, "rev-parse", "HEAD")
 
 
-def build_store(root: pathlib.Path) -> pathlib.Path:
+def build_store(root: pathlib.Path, directory: pathlib.Path) -> pathlib.Path:
     common = pathlib.Path(git_output(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    store = common.parent / ".build" / "installer"
-    if not store.resolve().is_relative_to(common.parent.resolve()):
+    checkout = common.parent.resolve()
+    store = (checkout / directory).resolve()
+    if not store.is_relative_to(checkout) or store == checkout:
         raise ReleaseError("The installer build store must stay inside its repository.")
     return store
 
@@ -449,13 +457,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "publish", "install"))
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1])
+    parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path(".build/installer"))
     args = parser.parse_args()
     root = args.repo_root.resolve()
     try:
-        commit = source_commit(root)
+        store = build_store(root, args.build_dir)
+        commit = source_commit(root, store)
         dependencies = json.loads(git_output(root, "show", f"{commit}:dependencies.json"))
         compiler = compiler_path(root, dependencies["InnoSetup"])
-        store = build_store(root)
         with locked_store(store):
             # An older checked-out release may have an accepted output with an
             # older mtime. Protect that exact version even if later work fails.

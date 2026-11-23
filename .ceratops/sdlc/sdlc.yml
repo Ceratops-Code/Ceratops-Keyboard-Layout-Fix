@@ -152,12 +152,12 @@ deliverables:
           requires:
             tools: [uv, windows, inno-setup]
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build]
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --build-dir, &installer-build-dir .build/installer]
         publish:
           requires:
             tools: [uv, windows, inno-setup, github-cli]
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish]
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish, --build-dir, *installer-build-dir]
   apps:
     ceratops-keyboard-layout:
       version: *ceratops-keyboard-layout-installer-version
@@ -180,4 +180,4 @@ deliverables:
           requires:
             tools: [uv, windows, inno-setup]
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install]
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install, --build-dir, *installer-build-dir]

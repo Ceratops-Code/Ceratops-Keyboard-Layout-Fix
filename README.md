@@ -171,7 +171,11 @@ published assets are never overwritten. The app's SDLC `install` action consumes
 the successful build and runs setup silently from an administrator terminal.
 Ceratops owns operation selection and order. Shipping selects package publication
 before local installation; the repository adapter performs each selected effect.
-Building alone does not publish or install it.
+Building alone does not publish or install it. Build, publish, and install
+receive the same `--build-dir` from SDLC. Direct callers can pass that option
+to `scripts/release-installer.py` with a directory under the primary checkout.
+The default is `.build/installer`. Each completed bundle keeps the installer,
+its source archive, and `receipt.json` together.
 The [user guide](README.txt) lists the desktop regression checks.
 `.ceratops/sdlc/sdlc.yml` is the operation contract. Ceratops executes its named
 operations; `scripts/run-tests.py` owns test selection. Its generated
