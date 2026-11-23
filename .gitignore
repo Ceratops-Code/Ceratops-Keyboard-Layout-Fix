@@ -1,6 +1,5 @@
 /scripts/node_modules/
-/.build/
 /CeratopsKeyboardLayout-Setup.exe
 /CeratopsKeyboardLayout-Setup-*.exe
 /.CeratopsKeyboardLayout-Setup-*.exe.tmp
-/.ceratops/results/test-diagnostics/
+/.test-diagnostics/
