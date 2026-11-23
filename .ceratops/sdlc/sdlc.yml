@@ -152,7 +152,7 @@ deliverables:
           requires:
             tools: [uv, windows, inno-setup]
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --build-dir, &installer-build-dir .build/installer, --receipt-file, '{build_receipt}']
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --build-dir, &installer-build-dir build/installer, --receipt-file, '{build_receipt}']
         publish:
           requires:
             tools: [uv, windows, inno-setup, github-cli]

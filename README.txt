@@ -254,7 +254,7 @@ Only successful bundles replace the current version's setup executable.
 Each checkout keeps that installer and at most two predecessors. At startup
 and after activation the helper prunes this versioned output group, removes
 abandoned atomic-copy files, and leaves unrelated files untouched.
-The primary checkout's .build\installer directory owns one lock and at most
+The primary checkout's build\installer directory owns one lock and at most
 three completed build bundles. Packaging bytes and compiler identity identify
 each bundle; changing only tests or CI does not rebuild an accepted installer.
 Each bundle contains the installer, GPL source ZIP and its build receipt.

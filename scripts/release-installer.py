@@ -3,7 +3,7 @@
 
 Inno Setup owns compilation and installation; gh owns GitHub authentication and
 uploads. Build, publish, and install share the directory passed as --build-dir
-(relative to the primary checkout), which defaults to .build/installer.
+(relative to the primary checkout), which defaults to build/installer.
 Each completed bundle holds its installer, source archive, and receipt.json.
 Packaging inputs, not test or CI edits, identify a build. Only integrity checks
 are repeated on reuse.
@@ -457,7 +457,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "publish", "install"))
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1])
-    parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path(".build/installer"))
+    parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path("build/installer"))
     parser.add_argument("--receipt-file", type=pathlib.Path, help="Write the result of the build action to this file.")
     args = parser.parse_args()
     if args.receipt_file and args.action != "build":
