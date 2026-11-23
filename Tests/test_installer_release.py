@@ -115,6 +115,15 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(release.read_build(bundle, record["identity"]), record)
         self.assertFalse(any(p.name.startswith(".staging-") for p in self.store.iterdir()))
 
+        receipt = self.root / "installer-result.json"
+        with mock.patch.object(release, "build_store", return_value=self.store), \
+             mock.patch.object(release, "source_commit", return_value=record["source_commit"]), \
+             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
+             mock.patch.object(sys, "argv", ["release-installer.py", "build", "--repo-root", str(self.root),
+                                              "--receipt-file", str(receipt)]):
+            self.assertEqual(release.main(), 0)
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["artifacts"], record["artifacts"])
+
         with mock.patch.object(release, "git_output", side_effect=[
             f"?? cache/{bundle.name}/receipt.json\0", record["source_commit"],
         ]):

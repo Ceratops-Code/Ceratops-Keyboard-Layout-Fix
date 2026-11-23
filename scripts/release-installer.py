@@ -458,7 +458,10 @@ def main() -> int:
     parser.add_argument("action", choices=("build", "publish", "install"))
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1])
     parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path(".build/installer"))
+    parser.add_argument("--receipt-file", type=pathlib.Path, help="Write the result of the build action to this file.")
     args = parser.parse_args()
+    if args.receipt_file and args.action != "build":
+        parser.error("--receipt-file requires the build action")
     root = args.repo_root.resolve()
     try:
         store = build_store(root, args.build_dir)
@@ -471,7 +474,11 @@ def main() -> int:
             current = root / installer_filename(source_version(root, commit))
             retain_checkout_installers(root, current)
             if args.action == "build":
-                build_installer(root, store, compiler, dependencies, commit)
+                bundle, record = build_installer(root, store, compiler, dependencies, commit)
+                if args.receipt_file:
+                    result = {"schema": BUILD_SCHEMA, "status": "passed", "bundle": str(bundle),
+                              "version": record["version"], "artifacts": record["artifacts"]}
+                    args.receipt_file.write_text(json.dumps(result) + "\n", encoding="utf-8")
             else:
                 with source_snapshot(root, store, commit) as (_, snapshot):
                     identity = build_identity(packaging_inputs(snapshot, compiler), dependencies["InnoSetup"])
