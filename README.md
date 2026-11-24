@@ -156,7 +156,9 @@ For privacy questions, contact the maintainer through the project's
 ## Build and release
 
 To build the installer, install the Inno Setup version pinned in
-`dependencies.json`. The SDLC package actions `test`, `build`, and `publish`
+`dependencies.json`. For a managed build, add the directory containing `ISCC.exe`
+to `PATH` so Ceratops can read the compiler engine's version before building.
+The SDLC package actions `test`, `build`, and `publish`
 for `ceratops-keyboard-layout-installer` call the repository-owned release
 workflow. It finds the compiler on `PATH` or in its standard Windows installation
 directories, builds `CeratopsKeyboardLayout-Setup.iss`, and creates

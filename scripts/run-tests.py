@@ -12,11 +12,10 @@ suite uses pytest to preserve the existing unittest cases.
 
 The caller may select the shared temporary base with CERATOPS_TASK_TEMP_ROOT.
 Otherwise the base is <repo-parent>/tmp. Scratch always adds
-<repo-name>/<checkout-name> beneath that base. Pytest owns its numbered scratch,
-retaining the current run and two predecessors and pruning abandoned outputs
-without deleting live runs. The updater suite owns and removes its private
-subdirectory. Bytecode and pytest's persistent cache are disabled. Final result
-receipts remain caller-owned; this runner never invents history paths.
+<repo-name>/<checkout-name> beneath that base. The installer suite asks pytest
+to remove its numbered scratch on exit and removes empty pytest parents there.
+The updater suite owns and removes its private subdirectory. Bytecode and
+pytest's persistent cache are disabled. Final result receipts remain caller-owned.
 """
 
 from __future__ import annotations
