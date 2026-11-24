@@ -163,9 +163,10 @@ directories, builds `CeratopsKeyboardLayout-Setup.iss`, and creates
 `CeratopsKeyboardLayout-Setup-<version>.exe` in the current checkout. `AppVersion`
 in the installer script owns the version used in its filename, Windows file
 details, and release tag. The SDLC build checks the requested package version
-against that declaration before compiling. The installer also carries the product description,
-Ceratops-Code publisher, copyright, and project/support/update links. These
-details do not replace a trusted code signature.
+against that declaration before compiling. The installer also carries the
+product description, Ceratops-Code publisher, copyright, and
+project/support/update links. These details do not replace a trusted code
+signature.
 Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's
 corresponding GPL source archive. Matching draft uploads resume after interruption;
 published assets are never overwritten. The app's SDLC `install` action consumes
