@@ -175,14 +175,18 @@ published assets are never overwritten. The app's SDLC `install` action consumes
 the successful build and runs setup silently from an administrator terminal.
 Ceratops owns operation selection and order. Shipping selects package publication
 before local installation; the repository adapter performs each selected effect.
-The package build puts the installer, AutoHotkey source archive and native
-`receipt.json` in `{artifact_directory}`. It writes their names to
+The package build puts the installer, AutoHotkey source archive and versioned
+build manifest in `{artifact_directory}`. It writes their names to
 `{build_receipt}`. Ceratops retains the accepted files in Git's common
 `ceratops/artifacts/` store and the version's receipt and check summary under
 `.ceratops/build/`. Installation opens the accepted executable. Publication
 reads the two assets and their original Git revision from that same package.
 The Windows product version comes from `CeratopsKeyboardLayout-Setup.iss`.
-Standalone callers can choose a native output folder with `--build-dir`.
+Direct Build uses the current checkout's versioned Git artifact slot and refuses
+an occupied destination. It emits one JSON result on stdout. Direct Install and
+Publish read that result on stdin. The build owns only
+`_installer-build/ceratops-keyboard-layout-installer` under the checkout's task
+temp directory and removes that scratch on entry and exit.
 The [user guide](README.txt) lists the desktop regression checks.
 `.ceratops/sdlc/sdlc.yml` is the operation contract. Ceratops executes its named
 operations; `scripts/run-tests.py` owns test selection. Its generated
