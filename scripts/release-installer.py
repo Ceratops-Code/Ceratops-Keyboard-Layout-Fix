@@ -473,6 +473,7 @@ def main() -> int:
     parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path("build/installer"))
     parser.add_argument("--receipt-file", type=pathlib.Path, help="Write the result of the build action to this file.")
     parser.add_argument("--artifact-directory", type=pathlib.Path, help="Write this build to the caller's allocated directory.")
+    parser.add_argument("--version", help="Require the committed installer version to match this package version.")
     parser.add_argument("--accepted-artifacts", help="Install or publish these accepted package files.")
     args = parser.parse_args()
     if args.artifact_directory is not None and (args.action != "build" or args.receipt_file is None):
@@ -481,6 +482,8 @@ def main() -> int:
         parser.error("--accepted-artifacts requires install or publish")
     if args.receipt_file and args.action != "build":
         parser.error("--receipt-file requires the build action")
+    if args.version is not None and args.action != "build":
+        parser.error("--version requires the build action")
     root = args.repo_root.resolve()
     try:
         if args.accepted_artifacts is not None:
@@ -504,6 +507,10 @@ def main() -> int:
             return 0
         store = args.artifact_directory.resolve(strict=True) if args.artifact_directory else build_store(root, args.build_dir)
         commit = source_commit(root, store)
+        if args.version is not None:
+            version = source_version(root, commit)
+            if args.version != version:
+                raise ReleaseError(f"Requested package version {args.version} differs from AppVersion {version}.")
         dependencies = json.loads(git_output(root, "show", f"{commit}:dependencies.json"))
         compiler = compiler_path(root, dependencies["InnoSetup"])
         with (contextlib.nullcontext() if args.artifact_directory else locked_store(store)):

@@ -162,7 +162,8 @@ workflow. It finds the compiler on `PATH` or in its standard Windows installatio
 directories, builds `CeratopsKeyboardLayout-Setup.iss`, and creates
 `CeratopsKeyboardLayout-Setup-<version>.exe` in the current checkout. `AppVersion`
 in the installer script owns the version used in its filename, Windows file
-details, and release tag. The installer also carries the product description,
+details, and release tag. The SDLC build checks the requested package version
+against that declaration before compiling. The installer also carries the product description,
 Ceratops-Code publisher, copyright, and project/support/update links. These
 details do not replace a trusted code signature.
 Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's

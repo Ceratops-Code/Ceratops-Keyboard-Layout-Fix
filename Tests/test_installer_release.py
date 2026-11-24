@@ -300,6 +300,20 @@ class BuildTests(unittest.TestCase):
         self.download.assert_not_called()
 
     def test_unsafe_version_fails_before_compilation(self) -> None:
+        receipt = self.store / "receipt.json"
+        arguments = [
+            "release-installer.py", "build", "--repo-root", str(self.root),
+            "--artifact-directory", str(self.store), "--receipt-file", str(receipt),
+            "--version", "1.0.13",
+        ]
+        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
+             mock.patch.object(release, "compiler_path") as compiler, \
+             mock.patch.object(sys, "argv", arguments), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(release.main(), 1)
+        self.assertIn("Requested package version 1.0.13 differs from AppVersion 1.0.12.", stderr.getvalue())
+        compiler.assert_not_called()
+        self.assertFalse(receipt.exists())
+
         script = self.root / release.SETUP_SCRIPT
         script.write_text('#define AppVersion "../outside"\n[Files]\nSource: "payload.ahk"\n', encoding="utf-8")
         with self.assertRaisesRegex(release.ReleaseError, "three-part"):

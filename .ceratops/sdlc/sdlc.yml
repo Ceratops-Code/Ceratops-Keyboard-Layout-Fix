@@ -116,12 +116,12 @@ deliverables:
               steps:
                 - run: [uv, run, --project, scripts, --locked, python, scripts/run-tests.py, --suite, installer]
         build:
-          parameters: [artifact_directory]
+          parameters: [version, artifact_directory]
           result-schema: ceratops-builder-output
           requires:
             tools: [uv, windows, inno-setup]
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --artifact-directory, '{artifact_directory}', --receipt-file, '{build_receipt}']
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --version, '{version}', --artifact-directory, '{artifact_directory}', --receipt-file, '{build_receipt}']
         publish:
           requires:
             tools: [uv, windows, github-cli]
