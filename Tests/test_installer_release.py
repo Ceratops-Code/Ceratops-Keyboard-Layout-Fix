@@ -589,6 +589,7 @@ class TaskTempRootTests(unittest.TestCase):
                 self.assertEqual(pathlib.Path(options["env"]["PYTEST_DEBUG_TEMPROOT"]), expected)
                 if interrupted and moment == "before":
                     raise KeyboardInterrupt
+                (expected / "pytest-of-fixture").mkdir()
                 (expected / "child-effect.txt").write_text("completed", encoding="utf-8")
                 if interrupted:
                     raise KeyboardInterrupt
@@ -599,10 +600,12 @@ class TaskTempRootTests(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(KeyboardInterrupt):
                     runner.main(["--suite", "installer"])
+                self.assertFalse((expected / "pytest-of-fixture").exists())
                 interrupted = False
                 self.assertEqual(runner.main(["--suite", "installer"]), 0)
                 self.assertEqual(runner.main(["--suite", "installer"]), 0)
             self.assertEqual((expected / "child-effect.txt").read_text(encoding="utf-8"), "completed")
+            self.assertFalse((expected / "pytest-of-fixture").exists())
             self.assertEqual([path.name for path in base.iterdir()], [primary.name])
 
 
@@ -742,6 +745,7 @@ class TestRunnerTests(unittest.TestCase):
         environment = self.command.call_args.kwargs["env"]
         self.assertEqual(command[:3], [sys.executable, "-m", "pytest"])
         self.assertFalse(any("basetemp" in argument for argument in command))
+        self.assertIn("tmp_path_retention_policy=none", command)
         self.assertEqual(environment["PYTEST_ADDOPTS"], "-q")
         self.assertEqual(environment["PYTEST_DEBUG_TEMPROOT"], str(self.root / "scratch"))
         self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")

@@ -22,6 +22,7 @@ receipts remain caller-owned; this runner never invents history paths.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import pathlib
@@ -107,7 +108,7 @@ def test_commands(
                 raise ValueError(f"test target must exist inside this repository: {target}")
         return [("installer", [
             sys.executable, "-m", "pytest", *targets, *without_basetemp(args.pytest_arg),
-            "-p", "no:cacheprovider", "-o", "tmp_path_retention_count=3",
+            "-p", "no:cacheprovider", "-o", "tmp_path_retention_policy=none",
         ])]
     powershell = shutil.which("pwsh")
     if powershell is None:
@@ -148,6 +149,19 @@ def execute_check(
         except OSError as error:
             code = 127
             result = subprocess.CompletedProcess(command, code, "", f"{type(error).__name__}: {error}")
+        finally:
+            if name == "installer":
+                # Pytest removes its numbered runs, leaving their empty parent.
+                for parent in temporary.glob("pytest-of-*"):
+                    if not parent.is_dir() or parent.is_symlink() or parent.is_junction():
+                        continue
+                    try:
+                        parent.rmdir()
+                    except FileNotFoundError:
+                        continue
+                    except OSError as error:
+                        if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                            print(f"Cannot remove pytest scratch parent {parent}: {error}", file=sys.stderr)
         checks.append({"name": name, "status": "passed" if code == 0 else "failed", "exit_code": code})
         if code:
             print(child_failure(command, result.returncode, result.stdout, result.stderr), file=sys.stderr)
