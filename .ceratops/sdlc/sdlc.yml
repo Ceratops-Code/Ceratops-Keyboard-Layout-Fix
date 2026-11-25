@@ -139,7 +139,23 @@ deliverables:
   packages:
     ceratops-keyboard-layout-installer:
       version: {mode: receipt-only}
-      root-dir: .
+      root-dir: Lib
+      additional-source-files:
+        - CeratopsKeyboardLayout-Setup.iss
+        - CeratopsKeyboardLayout.exe
+        - CeratopsKeyboardLayout*.ahk
+        - CeratopsKeyboardLayout.ico
+        - CeratopsKeyboardLayout.png
+        - Manage-KeyboardShortcuts.ahk
+        - Update-AppInstall.ps1
+        - Write-AppEventLog.ahk
+        - dependencies.json
+        - LICENSE
+        - license.txt
+        - README.txt
+        - scripts/release-installer.py
+        - scripts/pyproject.toml
+        - scripts/uv.lock
       build-after: []
       artifact:
         type: windows-installer
