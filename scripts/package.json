@@ -9,7 +9,7 @@
     "lint:markdown": "markdownlint \"../**/*.md\" --ignore \"../**/node_modules/**\" --config .markdownlint.json"
   },
   "devDependencies": {
-    "markdownlint-cli": "0.50.0"
+    "markdownlint-cli": "0.50.1"
   },
   "overrides": {
     "re2js": "2.8.7",
