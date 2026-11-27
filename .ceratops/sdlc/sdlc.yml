@@ -14,6 +14,45 @@ repository:
       version-from:
         file: dependencies.json
         key: InnoSetup
+      version:
+        read:
+          - '{python}'
+          - -c
+          - |
+            import re
+            import shutil
+            import subprocess
+
+            compiler = shutil.which("ISCC.exe")
+            if compiler is None:
+                raise SystemExit("ISCC.exe was not found on PATH.")
+
+            # ISCC exposes the engine version during compilation. Read a
+            # minimal script from stdin with installer output disabled.
+            command = [compiler, "/O-", "-"]
+            script = (
+                "[Setup]\n"
+                "AppName=Inno Setup version probe\n"
+                "AppVersion=1\n"
+                "CreateAppDir=no\n"
+                "Uninstallable=no\n"
+                "Output=no\n"
+            )
+            result = subprocess.run(
+                command, input=script, capture_output=True, text=True,
+                errors="replace", timeout=10, check=False,
+            )
+            version = re.search(
+                r"^Compiler engine version: Inno Setup (\d+\.\d+\.\d+)[ \t]*$",
+                result.stdout, re.MULTILINE,
+            )
+            if result.returncode or version is None:
+                raise SystemExit(
+                    f"Cannot read the Inno Setup version. {command!r} exited {result.returncode}.\n"
+                    f"stdout:\n{result.stdout or '(empty)'}\n"
+                    f"stderr:\n{result.stderr or '(empty)'}"
+                )
+            print(version[1])
       platforms: [windows]
     github-cli:
       executable: gh
@@ -45,7 +84,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: ['**/*.md']
-            check-inputs: [sdlc/sdlc.yml, scripts/package.json, scripts/.markdownlint.json]
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/package.json, scripts/.markdownlint.json]
             dependencies: [scripts/package-lock.json]
             tools: [node, npm]
           steps:
@@ -57,7 +96,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: ['**/*.py', '**/*.pyi', '**/*.ipynb']
-            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
             dependencies: [scripts/uv.lock]
             environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE]
             tools: [uv, python]
@@ -70,7 +109,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: ['**/*.py', '**/*.pyi', '**/*.ipynb']
-            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/pyproject.toml, .gitignore, '**/.gitignore']
             dependencies: [scripts/uv.lock]
             environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE, MYPYPATH]
             tools: [uv, python]
@@ -83,7 +122,7 @@ repository:
           check-results:
             result-owner: operation
             product-inputs: [.github/workflows/*.yml, .github/workflows/*.yaml, .github/actions/**]
-            check-inputs: [sdlc/sdlc.yml, scripts/pyproject.toml, scripts/run-actionlint.py, .github/actionlint.yaml,
+            check-inputs: [.ceratops/sdlc/sdlc.yml, scripts/pyproject.toml, scripts/run-actionlint.py, .github/actionlint.yaml,
                   .github/actionlint.yml]
             dependencies: [scripts/uv.lock]
             environment: [UV_OFFLINE, UV_PYTHON, UV_PYTHON_PREFERENCE, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH,
@@ -99,7 +138,53 @@ repository:
 deliverables:
   packages:
     ceratops-keyboard-layout-installer:
-      version: &ceratops-keyboard-layout-installer-version
+      version: {mode: receipt-only}
+      root-dir: Lib
+      additional-source-files:
+        - CeratopsKeyboardLayout-Setup.iss
+        - CeratopsKeyboardLayout.exe
+        - CeratopsKeyboardLayout*.ahk
+        - CeratopsKeyboardLayout.ico
+        - CeratopsKeyboardLayout.png
+        - Manage-KeyboardShortcuts.ahk
+        - Update-AppInstall.ps1
+        - Write-AppEventLog.ahk
+        - dependencies.json
+        - LICENSE
+        - license.txt
+        - README.txt
+        - scripts/release-installer.py
+        - scripts/pyproject.toml
+        - scripts/uv.lock
+      build-after: []
+      artifact:
+        type: windows-installer
+        # Standalone output. The build action below uses its allocated artifact_directory.
+        output-directory: .
+        filename-pattern: CeratopsKeyboardLayout-Setup-*.exe
+      actions:
+        pre-build-checks:
+          check-groups:
+            tests:
+              requires:
+                tools: [uv]
+              steps:
+                - run: [uv, run, --project, scripts, --locked, python, scripts/run-tests.py, --suite, installer]
+        build:
+          parameters: [version, artifact_directory]
+          result-schema: ceratops-builder-output
+          requires:
+            tools: [uv, windows, inno-setup]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build, --version, '{version}', --artifact-directory, '{artifact_directory}', --receipt-file, '{build_receipt}']
+        publish:
+          requires:
+            tools: [uv, windows, github-cli]
+          steps:
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish, --accepted-artifacts, '{artifacts}']
+  apps:
+    ceratops-keyboard-layout:
+      version:
         read:
           - "{python}"
           - "-c"
@@ -135,33 +220,6 @@ deliverables:
         files:
           - "CeratopsKeyboardLayout-Setup.iss"
       root-dir: .
-      build-after: []
-      artifact:
-        type: windows-installer
-        output-directory: .
-        filename-pattern: CeratopsKeyboardLayout-Setup-*.exe
-      actions:
-        pre-build-checks:
-          check-groups:
-            tests:
-              requires:
-                tools: [uv]
-              steps:
-                - run: [uv, run, --project, scripts, --locked, python, scripts/run-tests.py, --suite, installer]
-        build:
-          requires:
-            tools: [uv, windows, inno-setup]
-          steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, build]
-        publish:
-          requires:
-            tools: [uv, windows, inno-setup, github-cli]
-          steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, publish]
-  apps:
-    ceratops-keyboard-layout:
-      version: *ceratops-keyboard-layout-installer-version
-      root-dir: .
       manifest: CeratopsKeyboardLayout-Setup.iss
       build-after:
         - deliverables.packages.ceratops-keyboard-layout-installer
@@ -178,6 +236,6 @@ deliverables:
               no-op: Repository tests run separately; the desktop hotkey check runs locally before release.
         install:
           requires:
-            tools: [uv, windows, inno-setup]
+            tools: [uv, windows]
           steps:
-            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install]
+            - run: [uv, run, --project, scripts, --locked, python, scripts/release-installer.py, install, --accepted-artifacts, '{artifacts}']

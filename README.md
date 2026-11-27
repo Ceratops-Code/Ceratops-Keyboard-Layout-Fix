@@ -156,25 +156,43 @@ For privacy questions, contact the maintainer through the project's
 ## Build and release
 
 To build the installer, install the Inno Setup version pinned in
-`dependencies.json`. The SDLC package actions `test`, `build`, and `publish`
+`dependencies.json`. For a managed build, add the directory containing `ISCC.exe`
+to `PATH` so Ceratops can read the compiler engine's version before building.
+The SDLC package actions `test`, `build`, and `publish`
 for `ceratops-keyboard-layout-installer` call the repository-owned release
 workflow. It finds the compiler on `PATH` or in its standard Windows installation
 directories, builds `CeratopsKeyboardLayout-Setup.iss`, and creates
 `CeratopsKeyboardLayout-Setup-<version>.exe` in the current checkout. `AppVersion`
 in the installer script owns the version used in its filename, Windows file
-details, and release tag. The installer also carries the product description,
-Ceratops-Code publisher, copyright, and project/support/update links. These
-details do not replace a trusted code signature.
+details, and release tag. The SDLC build checks the requested package version
+against that declaration before compiling. The installer also carries the
+product description, Ceratops-Code publisher, copyright, and
+project/support/update links. These details do not replace a trusted code
+signature.
 Publishing uses GitHub CLI and attaches both the installer and AutoHotkey's
 corresponding GPL source archive. Matching draft uploads resume after interruption;
 published assets are never overwritten. The app's SDLC `install` action consumes
 the successful build and runs setup silently from an administrator terminal.
 Ceratops owns operation selection and order. Shipping selects package publication
 before local installation; the repository adapter performs each selected effect.
-Building alone does not publish or install it.
+The package build puts the installer, AutoHotkey source archive and versioned
+build manifest in `{artifact_directory}`. It writes their names to
+`{build_receipt}`. Ceratops retains the accepted files in Git's common
+`ceratops/artifacts/` store and the version's receipt and check summary under
+`.ceratops/build/`. Installation opens the accepted executable. Publication
+reads the two assets and their original Git revision from that same package.
+The Windows product version comes from `CeratopsKeyboardLayout-Setup.iss`.
+Direct Build uses the current checkout's versioned Git artifact slot and refuses
+an occupied destination. It emits one JSON result on stdout. Direct Install and
+Publish read that result on stdin. The build owns only
+`_installer-build/ceratops-keyboard-layout-installer` under the checkout's task
+temp directory and removes that scratch on entry and exit.
 The [user guide](README.txt) lists the desktop regression checks.
-`sdlc/sdlc.yml` is the operation contract. Ceratops executes its named operations;
-`scripts/run-tests.py` owns test selection and result receipts. The repository
+`.ceratops/sdlc/sdlc.yml` is the operation contract. Ceratops executes its named
+operations; `scripts/run-tests.py` owns test selection. Its generated
+`scripts/write_check_results.py` stores result receipts, appends individual
+outcomes, and compacts the current result file at command boundaries. The
+repository
 test action runs updater checks in CI and adds the interactive Windows suites
 locally. The installer package test action runs the existing Python cases through
 pytest. CI calls the same test launcher for the repository and installer suites.
@@ -183,7 +201,8 @@ Test scratch is grouped at `<temporary-base>/<repository-name>/<checkout-name>/`
 `CERATOPS_TASK_TEMP_ROOT` selects the shared temporary base; its default is
 `<repo-parent>/tmp`. The runner always adds the primary repository name and the
 current checkout name, including when the base is supplied by Codex or CI.
-Pytest keeps the current numbered scratch directory and two predecessors;
-the updater suite removes its private scratch directory when it finishes.
+The installer runner asks pytest to remove its numbered directories on exit,
+then removes empty pytest parents under that checkout's scratch root. The
+updater suite removes its private scratch directory when it finishes.
 `Tests/Test-AppUpdates.ps1` checks release selection, consent, download integrity,
 setup failure reporting and cache cleanup without installing software.

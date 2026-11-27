@@ -240,8 +240,8 @@ reporting a completed stop. An incomplete stop blocks setup from replacing the
 running files. The common Startup
 shortcut exists only in fallback mode and is owned by the installer. The
 source folder also contains the Tests directory.
-The project folder owns CeratopsKeyboardLayout-Setup.iss and versioned
-standalone setup executables. AppVersion in that script owns their filename,
+The project folder owns CeratopsKeyboardLayout-Setup.iss. AppVersion in that
+script owns the installer filename,
 Windows file/product version, and release tag. Publisher, description,
 copyright and project/support/update links are installer metadata; a trusted
 code signature is separate. Setup executables are excluded from Git and
@@ -250,18 +250,10 @@ for build, publication and installation. The Inno Setup version is pinned in
 dependencies.json. The helper finds ISCC.exe on PATH or in its standard Windows
 installation directories. It compiles CeratopsKeyboardLayout-Setup.iss into a
 private staging bundle and obtains the checksum-pinned AutoHotkey source ZIP.
-Only successful bundles replace the current version's setup executable.
-Each checkout keeps that installer and at most two predecessors. At startup
-and after activation the helper prunes this versioned output group, removes
-abandoned atomic-copy files, and leaves unrelated files untouched.
-The primary checkout's .build\installer directory owns one lock and at most
-three completed build bundles. Packaging bytes and compiler identity identify
-each bundle; changing only tests or CI does not rebuild an accepted installer.
-Each bundle contains the installer, GPL source ZIP and its build receipt.
-At startup the owning helper removes abandoned staging bundles under its lock;
-after each build or reuse it prunes all but the current bundle and two others.
-It removes private staging and atomic-copy files after success or failure and
-creates no operational history. Failed compilation leaves the previous setup.
+Direct Build saves a complete installer and GPL source ZIP in the checkout's
+versioned Git artifact slot. It refuses an existing destination. Its JSON
+stdout is the input for direct Install or Publish. The builder removes the
+checkout's deliverable scratch on entry and after success or failure.
 Publication requires a successful current build and authenticated GitHub CLI.
 It resumes matching draft uploads, checks the tag's source commit and uploaded
 checksums, and publishes only after both required assets are present. Published
@@ -270,7 +262,7 @@ The app's SDLC install action consumes the successful build and runs setup
 silently from an administrator terminal. Ceratops owns operation selection and
 order; shipping selects publication before local installation. The repository
 adapter performs each selected effect. Building does not install or publish it.
-The sdlc/sdlc.yml contract declares the operations selected by Ceratops. Its
+The .ceratops/sdlc/sdlc.yml contract declares the operations selected by Ceratops. Its
 repository and installer test actions use scripts/run-tests.py locally and in
 CI. Repository tests cover the updater; local Windows runs also require the
 interactive desktop suites. Installer cases run through pytest in the locked

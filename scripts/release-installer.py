@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Build, publish, or install the standalone Windows setup through SDLC.
+"""Build, install, or publish the Keyboard Layout Fix installer.
 
-Inno Setup owns compilation and installation; gh owns GitHub authentication and
-uploads. This adapter keeps successful build bundles under the primary checkout's
-.build/installer directory so linked worktrees share them. Packaging inputs, not
-test or CI edits, identify a build. Only integrity checks are repeated on reuse.
-The directory has one exclusive lock, at most three completed bundles, and no
-operational log. Private incomplete bundles are removed under the lock at startup
-and on failure. Each checkout keeps its current versioned installer and at most
-two predecessors; orphaned atomic-copy files are removed at startup. Published
-release assets are never replaced or deleted. Ceratops selects the requested
-SDLC operations and their order; this adapter performs only the selected effect.
+Direct builds publish a complete EXE and matching AutoHotkey source archive to
+the checkout's versioned Git artifact slot, and print one JSON result on stdout.
+Direct Install and Publish consume that result from stdin. SDLC callers supply
+their artifact directory and use the manifest that accompanies accepted files.
+
+The checkout's installer scratch holds one build. Its owner discards abandoned
+scratch on entry and removes the current scratch after success or failure.
 """
 
 from __future__ import annotations
@@ -28,15 +25,13 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
-import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 SETUP_SCRIPT = "CeratopsKeyboardLayout-Setup.iss"
 BUILD_SCHEMA = "ceratops-installer-build.v1"
-BUNDLE_NAME = re.compile(r"[0-9a-f]{64}")
-STAGING_NAME = re.compile(r"\.staging-[0-9a-f]{32}")
-SETUP_FILENAME = re.compile(rf"{re.escape(pathlib.Path(SETUP_SCRIPT).stem)}-\d+\.\d+\.\d+\.exe")
+PACKAGE = "ceratops-keyboard-layout-installer"
+MANIFEST_NAME = "KeyboardLayout-{version}-build-manifest.json"
 
 
 class ReleaseError(RuntimeError):
@@ -60,25 +55,6 @@ def source_version(root: pathlib.Path, commit: str | None = None) -> str:
     return versions[0]
 
 
-def retain_checkout_installers(root: pathlib.Path, current: pathlib.Path | None = None) -> None:
-    """Prune only this producer's versioned outputs under the shared build lock."""
-    completed = []
-    for path in root.iterdir():
-        if path.name.startswith(".") and path.name.endswith(".tmp") and SETUP_FILENAME.fullmatch(path.name[1:-4]):
-            if path.is_symlink() or not path.is_file():
-                raise ReleaseError(f"Unsafe installer temporary file: {path.name}")
-            path.unlink()
-        elif SETUP_FILENAME.fullmatch(path.name):
-            if path.is_symlink() or not path.is_file():
-                raise ReleaseError(f"Unsafe installer output: {path.name}")
-            completed.append(path)
-    completed.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
-    keep = {current, *[path for path in completed if path != current][:2]} if current else set(completed[:3])
-    for path in completed:
-        if path not in keep:
-            path.unlink()
-
-
 def run_command(
     argv: Sequence[str], root: pathlib.Path, *, data: bytes | None = None
 ) -> subprocess.CompletedProcess[bytes]:
@@ -100,19 +76,32 @@ def git_output(root: pathlib.Path, *args: str) -> str:
     return run_command(["git", *args], root).stdout.decode("utf-8").strip()
 
 
-def source_commit(root: pathlib.Path) -> str:
-    """Do not label a build with a commit that omits local source changes."""
-    if git_output(root, "status", "--porcelain"):
+def source_commit(root: pathlib.Path, store: pathlib.Path) -> str:
+    """Require committed source while allowing visible installer output in its directory."""
+    changes = git_output(root, "status", "--porcelain", "--untracked-files=all", "-z")
+    for change in changes.split("\0"):
+        if not change:
+            continue
+        if change.startswith("?? ") and (root / change[3:]).is_relative_to(store):
+            continue
         raise ReleaseError("Commit source changes before building or releasing the installer.")
     return git_output(root, "rev-parse", "HEAD")
 
 
-def build_store(root: pathlib.Path) -> pathlib.Path:
+def build_store(root: pathlib.Path, version: str) -> tuple[pathlib.Path, pathlib.Path]:
+    """Derive the installer scratch and native artifact slot from Git."""
     common = pathlib.Path(git_output(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    store = common.parent / ".build" / "installer"
-    if not store.resolve().is_relative_to(common.parent.resolve()):
-        raise ReleaseError("The installer build store must stay inside its repository.")
-    return store
+    registration = pathlib.Path(git_output(root, "rev-parse", "--absolute-git-dir"))
+    branch = git_output(root, "rev-parse", "--abbrev-ref", "HEAD")
+    checkout = "primary" if registration == common else registration.name
+    primary = common.parent
+    scratch = primary.parent / "tmp" / primary.name / checkout / "_installer-build" / PACKAGE
+    artifact_root = common / "ceratops" / "artifacts"
+    pool = artifact_root / "beta-stable" if branch == "release/local" else artifact_root / "worktrees" / checkout
+    bundle = pool / "members" / "packages" / PACKAGE / version / "native"
+    if any(path.resolve() != path or path.is_symlink() or path.is_junction() for path in (scratch, bundle)):
+        raise ReleaseError("The installer scratch and artifact paths must be canonical directories.")
+    return scratch, bundle
 
 
 def file_digest(path: pathlib.Path) -> str:
@@ -122,67 +111,9 @@ def file_digest(path: pathlib.Path) -> str:
 
 def remove_bundle(store: pathlib.Path, path: pathlib.Path) -> None:
     """Remove only this producer's direct, non-linked child directory."""
-    if path.is_symlink() or path.resolve().parent != store.resolve():
+    if path.is_symlink() or path.is_junction() or not path.is_dir() or path.resolve().parent != store.resolve():
         raise ReleaseError(f"Unsafe build directory: {path}")
     shutil.rmtree(path)
-
-
-@contextlib.contextmanager
-def locked_store(store: pathlib.Path) -> Iterator[None]:
-    """One lock spans compilation, activation, and all release side effects."""
-    store.mkdir(parents=True, exist_ok=True)
-    if store.is_symlink():
-        raise ReleaseError("The installer build store must not be a symbolic link.")
-    lock_path = store / ".lock"
-    if lock_path.is_symlink():
-        raise ReleaseError("The installer lock must not be a symbolic link.")
-    with lock_path.open("a+b") as lock:
-        try:
-            lock.seek(0)
-            if not lock.read(1):
-                lock.write(b"\0")
-                lock.flush()
-        except OSError as error:
-            raise ReleaseError("Another installer operation is already running.") from error
-        lock.seek(0)
-        if sys.platform == "win32":
-            import msvcrt
-
-            try:
-                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as error:
-                raise ReleaseError("Another installer operation is already running.") from error
-        else:
-            import fcntl
-
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as error:
-                raise ReleaseError("Another installer operation is already running.") from error
-        try:
-            for path in store.iterdir():
-                if STAGING_NAME.fullmatch(path.name):
-                    remove_bundle(store, path)
-            yield
-        finally:
-            lock.seek(0)
-            if sys.platform == "win32":
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-
-def retain_builds(store: pathlib.Path, current: pathlib.Path) -> None:
-    completed = sorted(
-        (p for p in store.iterdir() if BUNDLE_NAME.fullmatch(p.name) and p.is_dir()),
-        key=lambda p: p.stat().st_mtime_ns,
-        reverse=True,
-    )
-    # Current plus the two newest other completed bundles is the finite group.
-    keep = {current, *[p for p in completed if p != current][:2]}
-    for path in completed:
-        if path not in keep:
-            remove_bundle(store, path)
 
 
 def compiler_path(root: pathlib.Path, version: str) -> pathlib.Path:
@@ -262,45 +193,38 @@ def source_archive(root: pathlib.Path, dependencies: Mapping[str, str], output: 
         raise ReleaseError("The AutoHotkey source archive does not match its pinned checksum.")
 
 
-def read_build(bundle: pathlib.Path, identity: str) -> dict[str, Any]:
+def read_build(bundle: pathlib.Path, record: Any, *, accepted_names: set[str] | None = None) -> dict[str, Any]:
+    """Read the caller's build data and bind it to the exact installer payload."""
     try:
-        record = json.loads((bundle / "receipt.json").read_text(encoding="utf-8"))
-        if record["schema"] != BUILD_SCHEMA or record["identity"] != identity:
-            raise ReleaseError("The installer build receipt belongs to another build.")
-        if not re.fullmatch(r"\d+\.\d+\.\d+", record["version"]) or not isinstance(record["artifacts"], dict):
-            raise ReleaseError("The installer build receipt has invalid metadata.")
-        for name, digest in record["artifacts"].items():
-            if pathlib.PureWindowsPath(name).name != name or file_digest(bundle / name) != digest:
+        if record["schema"] != BUILD_SCHEMA or not re.fullmatch(r"[a-f0-9]{40}", record["source_commit"]):
+            raise ReleaseError("Invalid Keyboard Layout build result.")
+        setup_name = installer_filename(record["version"])
+        artifacts = record["artifacts"]
+        if (not isinstance(artifacts, dict) or len(artifacts) != 2 or setup_name not in artifacts
+                or not any(name.endswith("-source.zip") for name in artifacts)):
+            raise ReleaseError("The build must contain an installer and the corresponding source archive.")
+        if accepted_names is not None and accepted_names not in (
+            set(artifacts) | {"receipt.json"}, set(artifacts) | {MANIFEST_NAME.format(version=record["version"])},
+        ):
+            raise ReleaseError("The accepted installer files differ from the package manifest.")
+        for name, digest in artifacts.items():
+            path = bundle / name
+            if (pathlib.PureWindowsPath(name).name != name or not path.is_file() or path.is_symlink()
+                    or (accepted_names is None and file_digest(path) != digest)):
                 raise ReleaseError("A completed installer artifact changed after its build.")
-        if installer_filename(record["version"]) not in record["artifacts"]:
-            raise ReleaseError("The completed build has no installer.")
         return record
     except (OSError, ValueError, KeyError, TypeError) as error:
-        raise ReleaseError(f"The installer build is incomplete: {bundle.name}") from error
-
-
-def activate_installer(root: pathlib.Path, bundle: pathlib.Path, record: Mapping[str, Any]) -> None:
-    name = installer_filename(record["version"])
-    output = root / name
-    pending = root / f".{name}.tmp"
-    if output.is_symlink() or pending.is_symlink():
-        raise ReleaseError("The installer output must not be a symbolic link.")
-    pending.unlink(missing_ok=True)
-    try:
-        shutil.copyfile(bundle / name, pending)
-        pending.replace(output)
-    finally:
-        pending.unlink(missing_ok=True)
-    retain_checkout_installers(root, output)
+        raise ReleaseError(f"The installer build is incomplete: {bundle}") from error
 
 
 @contextlib.contextmanager
-def source_snapshot(root: pathlib.Path, store: pathlib.Path, commit: str) -> Iterator[tuple[pathlib.Path, pathlib.Path]]:
-    """Compile committed Git bytes in isolation from concurrent working edits."""
-    staging = store / f".staging-{uuid.uuid4().hex}"
-    snapshot = staging / "source"
-    snapshot.mkdir(parents=True)
+def source_snapshot(root: pathlib.Path, scratch: pathlib.Path, commit: str) -> Iterator[pathlib.Path]:
+    """Compile committed Git bytes in the one scratch directory for this deliverable."""
+    if os.path.lexists(scratch):
+        remove_bundle(scratch.parent, scratch)
+    snapshot = scratch / "source"
     try:
+        snapshot.mkdir(parents=True)
         data = run_command(["git", "archive", "--format=tar", commit], root).stdout
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             for member in archive:
@@ -318,44 +242,53 @@ def source_snapshot(root: pathlib.Path, store: pathlib.Path, commit: str) -> Ite
                         shutil.copyfileobj(stream, output)
                 else:
                     raise ReleaseError("Installer snapshots require ordinary tracked files.")
-        yield staging, snapshot
+        yield snapshot
     finally:
-        if staging.exists():
-            remove_bundle(store, staging)
+        if os.path.lexists(scratch):
+            remove_bundle(scratch.parent, scratch)
 
 
 def build_installer(
-    root: pathlib.Path, store: pathlib.Path, compiler: pathlib.Path,
-    dependencies: Mapping[str, str], commit: str,
+    root: pathlib.Path, compiler: pathlib.Path, dependencies: Mapping[str, str], commit: str,
+    *, output_directory: pathlib.Path | None = None,
 ) -> tuple[pathlib.Path, dict[str, Any]]:
-    with source_snapshot(root, store, commit) as (staging, snapshot):
-        version = source_version(snapshot)
-        setup_name = installer_filename(version)
+    version = source_version(root, commit)
+    scratch, standalone_bundle = build_store(root, version)
+    bundle = standalone_bundle if output_directory is None else output_directory
+    with source_snapshot(root, scratch, commit) as snapshot:
+        if output_directory is None and os.path.lexists(bundle):
+            raise ReleaseError(f"Installer output already exists: {bundle}")
         inputs = packaging_inputs(snapshot, compiler)
-        identity = build_identity(inputs, dependencies["InnoSetup"])
-        bundle = store / identity
-        if bundle.exists():
-            record = read_build(bundle, identity)
+        staged_package = scratch / "package"
+        staged_package.mkdir()
+        setup_name = installer_filename(version)
+        result = run_command([str(compiler), f"/O{staged_package}", SETUP_SCRIPT], snapshot)
+        banner = result.stdout.decode("utf-8", errors="replace")
+        match = re.search(r"Compiler engine version:\s*Inno Setup ([\d.]+)", banner)
+        if not match or match.group(1) != dependencies["InnoSetup"]:
+            raise ReleaseError("The compiler does not match the pinned Inno Setup version.")
+        if installer_version(staged_package / setup_name, root) != version:
+            raise ReleaseError("The compiled installer version differs from AppVersion.")
+        source_name = f"KeyboardLayout-{version}-AutoHotkey-v{dependencies['AutoHotkey']}-source.zip"
+        source_archive(root, dependencies, staged_package / source_name)
+        record = {
+            "schema": BUILD_SCHEMA, "identity": build_identity(inputs, dependencies["InnoSetup"]),
+            "source_commit": commit, "version": version, "inputs": inputs,
+            "artifacts": {name: file_digest(staged_package / name) for name in (setup_name, source_name)},
+        }
+        if output_directory is None:
+            bundle.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(bundle):
+                raise ReleaseError(f"Installer output already exists: {bundle}")
+            try:
+                staged_package.rename(bundle)
+            except FileExistsError as error:
+                raise ReleaseError(f"Installer output already exists: {bundle}") from error
         else:
-            result = run_command([str(compiler), f"/O{staging}", SETUP_SCRIPT], snapshot)
-            banner = result.stdout.decode("utf-8", errors="replace")
-            match = re.search(r"Compiler engine version:\s*Inno Setup ([\d.]+)", banner)
-            if not match or match.group(1) != dependencies["InnoSetup"]:
-                raise ReleaseError("The compiler does not match the pinned Inno Setup version.")
-            if installer_version(staging / setup_name, root) != version:
-                raise ReleaseError("The compiled installer version differs from AppVersion.")
-            source_name = f"AutoHotkey-v{dependencies['AutoHotkey']}-source.zip"
-            source_archive(root, dependencies, staging / source_name)
-            record = {
-                "schema": BUILD_SCHEMA, "identity": identity, "source_commit": commit,
-                "version": version, "inputs": inputs,
-                "artifacts": {name: file_digest(staging / name) for name in (setup_name, source_name)},
-            }
-            (staging / "receipt.json").write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
-            remove_bundle(staging, snapshot)
-            staging.rename(bundle)
-    activate_installer(root, bundle, record)
-    retain_builds(store, bundle)
+            manifest_name = MANIFEST_NAME.format(version=version)
+            (staged_package / manifest_name).write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+            for name in (*record["artifacts"], manifest_name):
+                os.replace(staged_package / name, bundle / name)
     return bundle, record
 
 
@@ -449,33 +382,74 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "publish", "install"))
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1])
+    parser.add_argument("--receipt-file", type=pathlib.Path, help="Write the SDLC result to the allocated file.")
+    parser.add_argument("--artifact-directory", type=pathlib.Path, help="Write to the SDLC build directory.")
+    parser.add_argument("--version", help="Require the committed installer version to match this package version.")
+    parser.add_argument("--accepted-artifacts", help="Install or publish these accepted package files.")
     args = parser.parse_args()
+    if bool(args.artifact_directory) != bool(args.receipt_file) or (
+        args.artifact_directory is not None and args.action != "build"
+    ):
+        parser.error("--artifact-directory and --receipt-file are used together for SDLC builds")
+    if args.accepted_artifacts is not None and args.action == "build":
+        parser.error("--accepted-artifacts requires install or publish")
+    if args.version is not None and args.action != "build":
+        parser.error("--version requires the build action")
     root = args.repo_root.resolve()
     try:
-        commit = source_commit(root)
-        dependencies = json.loads(git_output(root, "show", f"{commit}:dependencies.json"))
-        compiler = compiler_path(root, dependencies["InnoSetup"])
-        store = build_store(root)
-        with locked_store(store):
-            # An older checked-out release may have an accepted output with an
-            # older mtime. Protect that exact version even if later work fails.
-            current = root / installer_filename(source_version(root, commit))
-            retain_checkout_installers(root, current)
-            if args.action == "build":
-                build_installer(root, store, compiler, dependencies, commit)
+        if args.action == "build":
+            commit = source_commit(root, root / "build" / "installer")
+            if args.version is not None:
+                version = source_version(root, commit)
+                if args.version != version:
+                    raise ReleaseError(f"Requested package version {args.version} differs from AppVersion {version}.")
+            dependencies = json.loads(git_output(root, "show", f"{commit}:dependencies.json"))
+            compiler = compiler_path(root, dependencies["InnoSetup"])
+            allocated = args.artifact_directory.resolve(strict=True) if args.artifact_directory else None
+            bundle, record = build_installer(root, compiler, dependencies, commit, output_directory=allocated)
+            if args.receipt_file:
+                setup = installer_filename(record["version"])
+                outputs = [{"type": "windows-installer" if name == setup else "source-archive", "path": name}
+                           for name in record["artifacts"]]
+                outputs.append({"type": "build-manifest", "path": MANIFEST_NAME.format(version=record["version"])})
+                result = {"schema": "ceratops-builder-output", "status": "passed",
+                          "installationArtifactPath": setup, "artifacts": outputs}
+                args.receipt_file.write_text(json.dumps(result) + "\n", encoding="utf-8")
+                print("OK")
             else:
-                with source_snapshot(root, store, commit) as (_, snapshot):
-                    identity = build_identity(packaging_inputs(snapshot, compiler), dependencies["InnoSetup"])
-                bundle = store / identity
-                if not bundle.is_dir():
-                    raise ReleaseError("Run the SDLC installer build action before publication or installation.")
-                record = read_build(bundle, identity)
-                activate_installer(root, bundle, record)
-                retain_builds(store, bundle)
-                if args.action == "publish":
-                    publish_installer(root, bundle, record, commit)
-                else:
-                    run_command([str(root / installer_filename(record["version"])), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], root)
+                print(json.dumps({**record, "artifact_directory": str(bundle)}))
+            return 0
+
+        if args.accepted_artifacts is not None:
+            mapping = json.loads(args.accepted_artifacts)
+            paths = mapping.get(f"deliverables.packages.{PACKAGE}") if isinstance(mapping, dict) else None
+            if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
+                raise ReleaseError("The accepted keyboard installer package is missing.")
+            files = [pathlib.Path(path) for path in paths]
+            bundle = files[0].parent
+            if not all(path.is_absolute() and path.parent == bundle and path.is_file() for path in files):
+                raise ReleaseError("Expected files from one accepted keyboard installer package.")
+            names = {path.name for path in files}
+            manifests = [path for path in files if path.name == "receipt.json" or
+                         re.fullmatch(r"KeyboardLayout-\d+\.\d+\.\d+-build-manifest\.json", path.name)]
+            if len(names) != len(files) or len(manifests) != 1:
+                raise ReleaseError("The accepted installer package requires its native manifest.")
+            record = read_build(bundle, json.loads(manifests[0].read_text(encoding="utf-8")), accepted_names=names)
+        else:
+            if sys.stdin.isatty():
+                raise ReleaseError("Pass a direct build's JSON result on stdin.")
+            data = json.load(sys.stdin)
+            if not isinstance(data, dict) or not isinstance(data.get("artifact_directory"), str):
+                raise ReleaseError("Expected a direct build result with an artifact directory.")
+            bundle = pathlib.Path(data["artifact_directory"])
+            if not bundle.is_absolute():
+                raise ReleaseError("The installer artifact directory must be absolute.")
+            record = read_build(bundle, data)
+        if args.action == "publish":
+            publish_installer(root, bundle, record, record["source_commit"])
+        else:
+            run_command([str(bundle / installer_filename(record["version"])), "/VERYSILENT", "/SUPPRESSMSGBOXES",
+                         "/NORESTART", "/SP-"], root)
         print("OK")
         return 0
     except (ReleaseError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.CalledProcessError) as error:

@@ -49,11 +49,14 @@ class BuildTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="installer-check-", dir=TASK_TEMP_ROOT)
         self.addCleanup(temporary.cleanup)
-        self.root = pathlib.Path(temporary.name)
+        fixture = pathlib.Path(temporary.name)
+        self.root = fixture / "repo"
+        self.root.mkdir()
         self.version = "1.0.12"
         self.setup_name = "CeratopsKeyboardLayout-Setup-1.0.12.exe"
-        self.store = self.root / "cache"
-        self.store.mkdir()
+        self.store = fixture / "tmp/repo/primary/_installer-build" / release.PACKAGE
+        self.bundle = self.root / ".git/ceratops/artifacts/worktrees/primary/members/packages" / release.PACKAGE / self.version / "native"
+        self.build_result: dict[str, Any] = {}
         self.compiler = self.root / "tool" / "ISCC.exe"
         self.compiler.parent.mkdir()
         for name in ("ISCC.exe", "ISCmplr.dll", "ISPP.dll"):
@@ -74,6 +77,12 @@ class BuildTests(unittest.TestCase):
         if argv[:2] == ["git", "show"]:
             data = (self.root / release.SETUP_SCRIPT).read_bytes() if argv[2].endswith(":" + release.SETUP_SCRIPT) else json.dumps(self.dependencies).encode()
             return subprocess.CompletedProcess(argv, 0, data, b"")
+        if argv[:2] == ["git", "status"]:
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if argv[:2] == ["git", "rev-parse"]:
+            value = ("main" if "--abbrev-ref" in argv else
+                     "a" * 40 if argv[2:] == ["HEAD"] else str(self.root / ".git"))
+            return subprocess.CompletedProcess(argv, 0, value.encode(), b"")
         if argv[:2] == ["git", "archive"]:
             stream = io.BytesIO()
             with tarfile.open(fileobj=stream, mode="w") as archive:
@@ -89,41 +98,74 @@ class BuildTests(unittest.TestCase):
         path.write_bytes(b"corresponding GPL source")
 
     def build(self, commit: str = "a" * 40) -> tuple[pathlib.Path, dict[str, Any]]:
-        return release.build_installer(self.root, self.store, self.compiler, self.dependencies, commit)
+        bundle, result = release.build_installer(self.root, self.compiler, self.dependencies, commit)
+        self.build_result = {**result, "artifact_directory": str(bundle)}
+        return bundle, result
 
     def compiler_calls(self) -> list[Any]:
         return [call for call in self.command.call_args_list if call.args[0][0] == str(self.compiler)]
 
     def install(self) -> int:
-        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
-             mock.patch.object(release, "build_store", return_value=self.store), \
-             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(self.build_result))), \
              mock.patch.object(release.subprocess, "run", side_effect=AssertionError("Installation must not contact GitHub.")), \
              mock.patch.object(sys, "argv", ["release-installer.py", "install", "--repo-root", str(self.root)]), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return release.main()
 
     def installer_calls(self) -> list[Any]:
-        return [call for call in self.command.call_args_list if call.args[0][0] == str(self.root / self.setup_name)]
+        return [call for call in self.command.call_args_list if call.args[0][0] == str(self.bundle / self.setup_name)]
 
     def test_completed_build_contains_installer_and_corresponding_source(self) -> None:
-        bundle, record = self.build()
-        self.assertEqual((self.root / self.setup_name).read_bytes(), b"standalone installer")
-        self.assertEqual(record["version"], "1.0.12")
-        self.assertIn("CeratopsKeyboardLayout-Setup-1.0.12.exe", record["artifacts"])
+        output = io.StringIO()
+        with mock.patch.object(release, "compiler_path", return_value=self.compiler), \
+             mock.patch.object(sys, "argv", ["builder", "build", "--repo-root", str(self.root)]), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(release.main(), 0)
+        record = json.loads(output.getvalue())
+        self.assertEqual(pathlib.Path(record["artifact_directory"]), self.bundle)
+        self.assertEqual((self.bundle / self.setup_name).read_bytes(), b"standalone installer")
+        self.assertEqual(record["version"], self.version)
+        self.assertEqual(set(record["artifacts"]), {path.name for path in self.bundle.iterdir()})
         self.assertEqual(len(record["artifacts"]), 2)
-        self.assertEqual(release.read_build(bundle, record["identity"]), record)
-        self.assertFalse(any(p.name.startswith(".staging-") for p in self.store.iterdir()))
+        self.assertEqual(release.read_build(self.bundle, record), record)
+        self.assertFalse(self.store.exists())
 
-    def test_test_only_commit_reuses_completed_build_without_compilation(self) -> None:
+        receipt = self.root / "installer-result.json"
+        allocated = self.root / "allocated"
+        allocated.mkdir()
+        with (mock.patch.object(release, "compiler_path", return_value=self.compiler),
+              mock.patch.object(sys, "argv", ["builder", "build", "--repo-root", str(self.root),
+                                             "--artifact-directory", str(allocated), "--receipt-file", str(receipt)])):
+            self.assertEqual(release.main(), 0)
+        output = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual((output["schema"], output["installationArtifactPath"]),
+                         ("ceratops-builder-output", self.setup_name))
+        artifacts = [str(allocated / entry["path"]) for entry in output["artifacts"]]
+        self.assertEqual(set(artifacts), {str(path) for path in allocated.iterdir()})
+        self.assertTrue(all(self.version in pathlib.Path(path).name for path in artifacts))
+        self.assertFalse((self.root / self.setup_name).exists())
+        accepted = json.dumps({"deliverables.packages.ceratops-keyboard-layout-installer": artifacts})
+        with (mock.patch.object(release, "source_commit", side_effect=AssertionError("unexpected checkout access")),
+              mock.patch.object(release, "compiler_path", side_effect=AssertionError("unexpected build")),
+              mock.patch.object(release, "publish_installer") as publish):
+            for action in ("install", "publish"):
+                with mock.patch.object(sys, "argv", ["delivery", action, "--repo-root", str(self.root),
+                                                    "--accepted-artifacts", accepted]):
+                    self.assertEqual(release.main(), 0)
+            self.assertEqual(publish.call_args.args[1], allocated)
+            self.assertEqual(publish.call_args.args[3], record["source_commit"])
+        self.command.assert_any_call([str(allocated / self.setup_name), "/VERYSILENT", "/SUPPRESSMSGBOXES",
+                                      "/NORESTART", "/SP-"], self.root)
+
+    def test_repeat_refuses_the_completed_version_without_compilation(self) -> None:
         first, record = self.build()
-        (self.root / "Tests").mkdir()
-        (self.root / "Tests" / "case.py").write_text("new test", encoding="utf-8")
-        second, reused = self.build("b" * 40)
-        self.assertEqual(first, second)
-        self.assertEqual(reused, record)
+        self.store.mkdir(parents=True)
+        (self.store / "abandoned").write_bytes(b"partially published")
+        with self.assertRaisesRegex(release.ReleaseError, "output already exists"):
+            self.build("b" * 40)
+        self.assertEqual(release.read_build(first, record), record)
         self.assertEqual(len(self.compiler_calls()), 1)
-        self.assertEqual(self.download.call_count, 1)
+        self.assertFalse(self.store.exists())
 
     def test_compilation_uses_snapshot_when_original_changes(self) -> None:
         captured: list[bytes] = []
@@ -144,7 +186,9 @@ class BuildTests(unittest.TestCase):
             archive.addfile(member, io.BytesIO(b"x"))
         self.command.side_effect = None
         self.command.return_value = subprocess.CompletedProcess([], 0, stream.getvalue(), b"")
-        with self.assertRaisesRegex(release.ReleaseError, "outside"):
+        with (mock.patch.object(release, "source_version", return_value=self.version),
+              mock.patch.object(release, "build_store", return_value=(self.store, self.bundle)),
+              self.assertRaisesRegex(release.ReleaseError, "outside")):
             self.build()
         self.assertFalse((self.root / "escaped.txt").exists())
 
@@ -158,7 +202,7 @@ class BuildTests(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             self.build()
         self.assertEqual((self.root / self.setup_name).read_bytes(), b"previous accepted build")
-        self.assertEqual(list(self.store.iterdir()), [])
+        self.assertFalse(self.store.exists())
 
     def test_source_download_failure_does_not_activate_partial_build(self) -> None:
         (self.root / self.setup_name).write_bytes(b"previous accepted build")
@@ -166,13 +210,13 @@ class BuildTests(unittest.TestCase):
         with self.assertRaises(OSError):
             self.build()
         self.assertEqual((self.root / self.setup_name).read_bytes(), b"previous accepted build")
-        self.assertEqual(list(self.store.iterdir()), [])
+        self.assertFalse(self.store.exists())
 
     def test_changed_completed_artifact_is_refused_without_rebuilding(self) -> None:
         bundle, _ = self.build()
-        (bundle / self.setup_name).write_bytes(b"changed unexpectedly")
-        with self.assertRaisesRegex(release.ReleaseError, "changed after"):
-            self.build()
+        (bundle / self.setup_name).write_bytes(b"changed")
+        self.assertEqual(self.install(), 1)
+        self.assertFalse(self.installer_calls())
         self.assertEqual(len(self.compiler_calls()), 1)
 
     def test_wrong_compiler_version_does_not_activate_output(self) -> None:
@@ -186,61 +230,43 @@ class BuildTests(unittest.TestCase):
         self.assertFalse((self.root / self.setup_name).exists())
         self.download.assert_not_called()
 
-    def test_only_current_and_two_predecessors_remain(self) -> None:
-        current = None
-        for number in range(5):
-            (self.root / "payload.ahk").write_text(str(number), encoding="utf-8")
-            current, _ = self.build()
-        self.assertEqual(len([p for p in self.store.iterdir() if p.is_dir()]), 3)
-        assert current is not None
-        self.assertTrue(current.is_dir())
+    def test_builder_leaves_older_versions_to_store_retention(self) -> None:
+        older = self.bundle.parent.parent / "1.0.1" / "native"
+        older.mkdir(parents=True)
+        artifact = older / "previous.exe"
+        artifact.write_bytes(b"previous")
+        self.build()
+        self.assertEqual(artifact.read_bytes(), b"previous")
+        self.assertFalse(self.store.exists())
 
-    def test_versioned_checkout_outputs_are_bounded_without_removing_other_files(self) -> None:
-        unrelated = self.root / "unrelated.exe"
-        unrelated.write_bytes(b"unrelated")
-        for number in range(12, 17):
-            self.version = f"1.0.{number}"
-            self.setup_name = f"CeratopsKeyboardLayout-Setup-{self.version}.exe"
-            script = self.root / release.SETUP_SCRIPT
-            script.write_text(f'#define AppVersion "{self.version}"\n[Files]\nSource: "payload.ahk"\n', encoding="utf-8")
+    def test_builder_leaves_checkout_outputs_untouched(self) -> None:
+        unrelated = self.root / self.setup_name
+        unrelated.write_bytes(b"existing output")
+        self.build()
+        self.assertEqual(unrelated.read_bytes(), b"existing output")
+        self.assertEqual((self.bundle / self.setup_name).read_bytes(), b"standalone installer")
+
+    def test_startup_only_removes_this_deliverable_scratch(self) -> None:
+        self.store.mkdir(parents=True)
+        (self.store / "old").write_bytes(b"orphan")
+        unrelated = self.store.parent / "another-deliverable"
+        unrelated.mkdir()
+        (unrelated / "keep").write_bytes(b"keep")
+        self.build()
+        self.assertFalse(self.store.exists())
+        self.assertEqual((unrelated / "keep").read_bytes(), b"keep")
+
+    def test_startup_preserves_previous_output_when_build_fails(self) -> None:
+        self.store.mkdir(parents=True)
+        (self.store / "incomplete").write_bytes(b"older scratch")
+        unrelated = self.root / self.setup_name
+        unrelated.write_bytes(b"previous")
+        self.download.side_effect = release.ReleaseError("Failed to download source")
+        with self.assertRaisesRegex(release.ReleaseError, "Failed to download source"):
             self.build()
-        self.assertEqual(len(list(self.root.glob("CeratopsKeyboardLayout-Setup-*.exe"))), 3)
-        self.assertEqual((self.root / self.setup_name).read_bytes(), b"standalone installer")
-        self.assertEqual(unrelated.read_bytes(), b"unrelated")
-
-    def test_startup_removes_only_owned_atomic_copy_orphans(self) -> None:
-        orphan = self.root / f".{self.setup_name}.tmp"
-        unrelated = self.root / ".unrelated.exe.tmp"
-        orphan.write_bytes(b"partial copy")
-        unrelated.write_bytes(b"unrelated")
-        release.retain_checkout_installers(self.root)
-        self.assertFalse(orphan.exists())
-        self.assertTrue(unrelated.exists())
-
-    def test_startup_preserves_older_current_installer_when_build_fails(self) -> None:
-        current = self.root / self.setup_name
-        current.write_bytes(b"accepted current release")
-        os.utime(current, (1, 1))
-        for number in range(13, 16):
-            newer = self.root / f"CeratopsKeyboardLayout-Setup-1.0.{number}.exe"
-            newer.write_bytes(b"another release")
-            os.utime(newer, (number, number))
-
-        def fail_compilation(argv: list[str], root: pathlib.Path) -> subprocess.CompletedProcess[bytes]:
-            if argv[0] == str(self.compiler):
-                raise release.ReleaseError("compiler failed")
-            return self.compile(argv, root)
-
-        self.command.side_effect = fail_compilation
-        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
-             mock.patch.object(release, "build_store", return_value=self.store), \
-             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
-             mock.patch.object(sys, "argv", ["release-installer.py", "build", "--repo-root", str(self.root)]), \
-             contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(release.main(), 1)
-        self.assertEqual(current.read_bytes(), b"accepted current release")
-        self.assertEqual(len(list(self.root.glob("CeratopsKeyboardLayout-Setup-*.exe"))), 3)
-        self.assertEqual([path.name for path in self.store.iterdir()], [".lock"])
+        self.assertEqual(unrelated.read_bytes(), b"previous")
+        self.assertFalse(self.store.exists())
+        self.assertFalse(self.bundle.exists())
 
     def test_mismatched_compiled_version_preserves_accepted_output(self) -> None:
         output = self.root / self.setup_name
@@ -249,29 +275,45 @@ class BuildTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseError, "differs from AppVersion"):
                 self.build()
         self.assertEqual(output.read_bytes(), b"previous accepted build")
-        self.assertEqual(list(self.store.iterdir()), [])
+        self.assertFalse(self.store.exists())
         self.download.assert_not_called()
 
     def test_unsafe_version_fails_before_compilation(self) -> None:
+        receipt = self.store / "receipt.json"
+        arguments = [
+            "release-installer.py", "build", "--repo-root", str(self.root),
+            "--artifact-directory", str(self.store), "--receipt-file", str(receipt),
+            "--version", "1.0.13",
+        ]
+        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
+             mock.patch.object(release, "compiler_path") as compiler, \
+             mock.patch.object(sys, "argv", arguments), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(release.main(), 1)
+        self.assertIn("Requested package version 1.0.13 differs from AppVersion 1.0.12.", stderr.getvalue())
+        compiler.assert_not_called()
+        self.assertFalse(receipt.exists())
+
         script = self.root / release.SETUP_SCRIPT
         script.write_text('#define AppVersion "../outside"\n[Files]\nSource: "payload.ahk"\n', encoding="utf-8")
         with self.assertRaisesRegex(release.ReleaseError, "three-part"):
             self.build()
         self.assertEqual(self.compiler_calls(), [])
 
-    def test_orphan_cleanup_keeps_unrelated_directory(self) -> None:
-        orphan = self.store / (".staging-" + "a" * 32)
-        unrelated = self.store / "unrelated"
-        orphan.mkdir()
-        unrelated.mkdir()
-        with release.locked_store(self.store):
-            self.assertFalse(orphan.exists())
-            self.assertTrue(unrelated.is_dir())
+    def test_release_local_uses_the_shared_release_pool(self) -> None:
+        with mock.patch.object(release, "git_output", side_effect=[
+            str(self.root / ".git"), str(self.root / ".git"), "release/local",
+        ]):
+            scratch, output = release.build_store(self.root, self.version)
+        self.assertEqual(scratch, self.store)
+        self.assertIn("beta-stable", output.parts)
+        self.assertEqual(output.parts[-2:], (self.version, "native"))
 
-    def test_second_operation_cannot_share_the_live_store(self) -> None:
-        with release.locked_store(self.store):
-            with self.assertRaises(release.ReleaseError), release.locked_store(self.store):
-                self.fail("A second operation acquired the same store.")
+    def test_existing_directory_at_publication_cannot_be_overwritten(self) -> None:
+        with (mock.patch.object(pathlib.Path, "rename", side_effect=FileExistsError),
+              self.assertRaisesRegex(release.ReleaseError, "output already exists")):
+            self.build()
+        self.assertFalse(self.bundle.exists())
+        self.assertFalse(self.store.exists())
 
     def test_wildcard_source_is_refused_before_compilation(self) -> None:
         (self.root / release.SETUP_SCRIPT).write_text(f'#define AppVersion "{self.version}"\n[Files]\nSource: "*.ahk"\n', encoding="utf-8")
@@ -288,9 +330,7 @@ class BuildTests(unittest.TestCase):
     _real_source_archive = staticmethod(release.source_archive)
 
     def test_missing_build_prevents_installation(self) -> None:
-        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
-             mock.patch.object(release, "build_store", return_value=self.store), \
-             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
+        with mock.patch.object(sys, "stdin", io.StringIO("")), \
              mock.patch.object(sys, "argv", ["release-installer.py", "install", "--repo-root", str(self.root)]), \
              contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(release.main(), 1)
@@ -300,7 +340,7 @@ class BuildTests(unittest.TestCase):
         self.build()
         self.assertEqual(self.install(), 0)
         self.assertEqual(len(self.compiler_calls()), 1)
-        self.assertEqual(self.command.call_args.args[0][0], str(self.root / self.setup_name))
+        self.assertEqual(self.command.call_args.args[0][0], str(self.bundle / self.setup_name))
         self.assertFalse(any(call.args[0][0] == "gh" for call in self.command.call_args_list))
 
     def test_repeated_installation_and_interruption_use_the_completed_build(self) -> None:
@@ -311,10 +351,10 @@ class BuildTests(unittest.TestCase):
             interrupt = True
 
             def install_effect(argv: list[str], root: pathlib.Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-                if argv[0] == str(self.root / self.setup_name):
+                if argv[0] == str(self.bundle / self.setup_name):
                     if interrupt and boundary == "before":
                         raise release.ReleaseError("installation interrupted before launch")
-                    target[:] = [(self.root / self.setup_name).read_bytes()]
+                    target[:] = [(self.bundle / self.setup_name).read_bytes()]
                     if interrupt and boundary == "after":
                         raise release.ReleaseError("installation interrupted after launch")
                 return self.compile(argv, root, **kwargs)
@@ -339,14 +379,12 @@ class BuildTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, b"not an archive", b"")
             return self.compile(argv, root)
         self.command.side_effect = unreadable_archive
-        with mock.patch.object(release, "source_commit", return_value="a" * 40), \
-             mock.patch.object(release, "build_store", return_value=self.store), \
-             mock.patch.object(release, "compiler_path", return_value=self.compiler), \
+        with mock.patch.object(release, "compiler_path", return_value=self.compiler), \
              mock.patch.object(sys, "argv", ["release-installer.py", "build", "--repo-root", str(self.root)]), \
              contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(release.main(), 1)
-        self.assertFalse((self.root / self.setup_name).exists())
-        self.assertFalse(any(p.name.startswith(".staging-") for p in self.store.iterdir()))
+        self.assertFalse(self.bundle.exists())
+        self.assertFalse(self.store.exists())
 
 
 class FakeGitHub:
@@ -516,7 +554,7 @@ class TaskTempRootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="root-check-", dir=TASK_TEMP_ROOT) as directory:
             base = pathlib.Path(directory) / "shared-temp"
             failed = subprocess.CompletedProcess([], 128, "", "repository unavailable")
-            with mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base)}), \
+            with mock.patch("write_check_results.CurrentCheckResults"), mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base)}), \
                  mock.patch.object(runner.subprocess, "run", return_value=failed) as command, \
                  contextlib.redirect_stderr(io.StringIO()) as stderr:
                 self.assertEqual(runner.main(["--suite", "installer"]), 2)
@@ -542,20 +580,23 @@ class TaskTempRootTests(unittest.TestCase):
                 self.assertEqual(pathlib.Path(options["env"]["PYTEST_DEBUG_TEMPROOT"]), expected)
                 if interrupted and moment == "before":
                     raise KeyboardInterrupt
+                (expected / "pytest-of-fixture").mkdir()
                 (expected / "child-effect.txt").write_text("completed", encoding="utf-8")
                 if interrupted:
                     raise KeyboardInterrupt
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            with mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base), "PYTEST_ADDOPTS": ""}), \
+            with mock.patch("write_check_results.CurrentCheckResults"), mock.patch.dict(os.environ, {"CERATOPS_TASK_TEMP_ROOT": str(base), "PYTEST_ADDOPTS": ""}), \
                  mock.patch.object(runner.subprocess, "run", side_effect=launch), \
                  contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(KeyboardInterrupt):
                     runner.main(["--suite", "installer"])
+                self.assertFalse((expected / "pytest-of-fixture").exists())
                 interrupted = False
                 self.assertEqual(runner.main(["--suite", "installer"]), 0)
                 self.assertEqual(runner.main(["--suite", "installer"]), 0)
             self.assertEqual((expected / "child-effect.txt").read_text(encoding="utf-8"), "completed")
+            self.assertFalse((expected / "pytest-of-fixture").exists())
             self.assertEqual([path.name for path in base.iterdir()], [primary.name])
 
 
@@ -566,6 +607,7 @@ class TestRunnerTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="runner-check-", dir=TASK_TEMP_ROOT)
         self.addCleanup(temporary.cleanup)
         self.root = pathlib.Path(temporary.name)
+        self.enterContext(mock.patch("write_check_results.CurrentCheckResults"))
         self.enterContext(mock.patch.object(runner, "task_temp_root", return_value=self.root / "scratch"))
         self.enterContext(mock.patch.object(runner.platform, "system", return_value="Windows"))
         self.enterContext(mock.patch.object(runner.shutil, "which", return_value="pwsh"))
@@ -588,6 +630,8 @@ class TestRunnerTests(unittest.TestCase):
         return json.loads((self.root / f"{identity}.json").read_text(encoding="utf-8"))
 
     def test_local_desktop_and_ci_have_distinct_recorded_scope(self) -> None:
+        from write_check_results import summarize_check_result
+
         self.assertEqual(self.run_runner(self.receipt_arguments("desktop")), 0)
         self.assertEqual(self.command.call_count, 4)
         desktop = self.read_receipt("desktop")
@@ -595,6 +639,8 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in desktop["checks"]],
                          ["updater", "key-conversion", "shortcut-dispatch", "accessible-conversion"])
         self.assertTrue(all(item["status"] == "passed" for item in desktop["checks"]))
+        self.assertEqual([item["id"] for item in summarize_check_result(desktop)["checks"]],
+                         ["updater", "key-conversion", "shortcut-dispatch", "accessible-conversion"])
         self.command.reset_mock()
         with mock.patch.dict(os.environ, {"CI": "true"}), \
              mock.patch.object(runner.platform, "system", return_value="Linux"):
@@ -604,6 +650,9 @@ class TestRunnerTests(unittest.TestCase):
         ci = self.read_receipt("ci")
         self.assertEqual(ci["invocation"]["profile"], "ci")
         self.assertEqual(ci["checks"][-1]["status"], "not_applicable")
+        optional = summarize_check_result(ci)["checks"][-1]
+        self.assertEqual(optional["id"], "desktop-interaction")
+        self.assertFalse(optional["required"])
 
     def test_ci_acceptance_cannot_replace_desktop_tests(self) -> None:
         arguments = self.receipt_arguments("ci")
@@ -694,6 +743,7 @@ class TestRunnerTests(unittest.TestCase):
         environment = self.command.call_args.kwargs["env"]
         self.assertEqual(command[:3], [sys.executable, "-m", "pytest"])
         self.assertFalse(any("basetemp" in argument for argument in command))
+        self.assertIn("tmp_path_retention_policy=none", command)
         self.assertEqual(environment["PYTEST_ADDOPTS"], "-q")
         self.assertEqual(environment["PYTEST_DEBUG_TEMPROOT"], str(self.root / "scratch"))
         self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
@@ -707,6 +757,8 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("FileNotFoundError: missing executable", self.stderr)
 
     def test_shared_probe_protocol_keeps_canonical_acceptance_and_reuses_it(self) -> None:
+        from write_check_results import select_build_check_summaries
+
         command = [sys.executable, "-c", "pass"]
         arguments = self.receipt_arguments("probe") + ["--probe-command", json.dumps(command)]
         self.assertEqual(self.run_runner(arguments), 0)
@@ -718,6 +770,23 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual(self.command.call_args.args[0], command)
         self.assertEqual(self.run_runner(arguments), 0)
         self.assertEqual(self.command.call_count, 1)
+
+        tag = "members/packages/fixture/1.0a1"
+        path = f".ceratops/build/{tag}/build_receipt.json"
+        stored = {"tag": tag, "receipt": {"identity": {"target": "native"}},
+                  "summary": {"checks": [{**receipt, "qualificationLevel": "alpha"}]}}
+        with (mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}),
+              mock.patch("write_check_results._build_git") as git,
+              mock.patch("write_check_results.read_build_check_summary", return_value=stored) as read):
+            for _repeat in range(2):
+                git.side_effect = [b"head-commit", tag.encode() + b"\n", path.encode() + b"\0"]
+                self.assertEqual(select_build_check_summaries(self.root, qualification_level="beta"), [stored])
+                read.assert_called_with(self.root, tag, path, revision="head-commit")
+            read.reset_mock()
+            for level in ("rc", "final"):
+                git.side_effect = [b"head-commit", tag.encode() + b"\n"]
+                self.assertEqual(select_build_check_summaries(self.root, qualification_level=level), [])
+            read.assert_not_called()
 
 
 class GitHubResponseTests(unittest.TestCase):
