@@ -630,6 +630,8 @@ class TestRunnerTests(unittest.TestCase):
         return json.loads((self.root / f"{identity}.json").read_text(encoding="utf-8"))
 
     def test_local_desktop_and_ci_have_distinct_recorded_scope(self) -> None:
+        from write_check_results import summarize_check_result
+
         self.assertEqual(self.run_runner(self.receipt_arguments("desktop")), 0)
         self.assertEqual(self.command.call_count, 4)
         desktop = self.read_receipt("desktop")
@@ -637,6 +639,8 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in desktop["checks"]],
                          ["updater", "key-conversion", "shortcut-dispatch", "accessible-conversion"])
         self.assertTrue(all(item["status"] == "passed" for item in desktop["checks"]))
+        self.assertEqual([item["id"] for item in summarize_check_result(desktop)["checks"]],
+                         ["updater", "key-conversion", "shortcut-dispatch", "accessible-conversion"])
         self.command.reset_mock()
         with mock.patch.dict(os.environ, {"CI": "true"}), \
              mock.patch.object(runner.platform, "system", return_value="Linux"):
@@ -646,6 +650,9 @@ class TestRunnerTests(unittest.TestCase):
         ci = self.read_receipt("ci")
         self.assertEqual(ci["invocation"]["profile"], "ci")
         self.assertEqual(ci["checks"][-1]["status"], "not_applicable")
+        optional = summarize_check_result(ci)["checks"][-1]
+        self.assertEqual(optional["id"], "desktop-interaction")
+        self.assertFalse(optional["required"])
 
     def test_ci_acceptance_cannot_replace_desktop_tests(self) -> None:
         arguments = self.receipt_arguments("ci")

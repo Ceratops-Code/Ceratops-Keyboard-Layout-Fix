@@ -142,7 +142,7 @@ def execute_check(
                                     capture_output=True, text=True, encoding="utf-8", errors="replace")
             code = result.returncode if result.returncode >= 0 else 1
         except KeyboardInterrupt:
-            checks.append({"name": name, "status": "interrupted", "exit_code": 130})
+            checks.append({"id": name, "name": name, "status": "interrupted", "exit_code": 130})
             print(child_failure(command, "interrupted", "", ""), file=sys.stderr)
             raise
         except OSError as error:
@@ -161,13 +161,17 @@ def execute_check(
                     except OSError as error:
                         if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
                             print(f"Cannot remove pytest scratch parent {parent}: {error}", file=sys.stderr)
-        checks.append({"name": name, "status": "passed" if code == 0 else "failed", "exit_code": code})
+        checks.append({
+            "id": name, "name": name, "status": "passed" if code == 0 else "failed", "exit_code": code,
+        })
         if code:
             print(child_failure(command, result.returncode, result.stdout, result.stderr), file=sys.stderr)
             return code
     if args.profile == "ci":
-        checks.append({"name": "desktop-interaction", "status": "not_applicable",
-                       "reason": "Interactive Windows suites run locally before release."})
+        checks.append({
+            "id": "desktop-interaction", "name": "desktop-interaction", "status": "not_applicable",
+            "required": False, "reason": "Interactive Windows suites run locally before release.",
+        })
     print("OK")
     return 0
 
