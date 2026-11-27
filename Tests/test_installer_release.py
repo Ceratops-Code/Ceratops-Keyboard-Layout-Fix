@@ -750,6 +750,8 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("FileNotFoundError: missing executable", self.stderr)
 
     def test_shared_probe_protocol_keeps_canonical_acceptance_and_reuses_it(self) -> None:
+        from write_check_results import select_build_check_summaries
+
         command = [sys.executable, "-c", "pass"]
         arguments = self.receipt_arguments("probe") + ["--probe-command", json.dumps(command)]
         self.assertEqual(self.run_runner(arguments), 0)
@@ -761,6 +763,23 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual(self.command.call_args.args[0], command)
         self.assertEqual(self.run_runner(arguments), 0)
         self.assertEqual(self.command.call_count, 1)
+
+        tag = "members/packages/fixture/1.0a1"
+        path = f".ceratops/build/{tag}/build_receipt.json"
+        stored = {"tag": tag, "receipt": {"identity": {"target": "native"}},
+                  "summary": {"checks": [{**receipt, "qualificationLevel": "alpha"}]}}
+        with (mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}),
+              mock.patch("write_check_results._build_git") as git,
+              mock.patch("write_check_results.read_build_check_summary", return_value=stored) as read):
+            for _repeat in range(2):
+                git.side_effect = [b"head-commit", tag.encode() + b"\n", path.encode() + b"\0"]
+                self.assertEqual(select_build_check_summaries(self.root, qualification_level="beta"), [stored])
+                read.assert_called_with(self.root, tag, path, revision="head-commit")
+            read.reset_mock()
+            for level in ("rc", "final"):
+                git.side_effect = [b"head-commit", tag.encode() + b"\n"]
+                self.assertEqual(select_build_check_summaries(self.root, qualification_level=level), [])
+            read.assert_not_called()
 
 
 class GitHubResponseTests(unittest.TestCase):
